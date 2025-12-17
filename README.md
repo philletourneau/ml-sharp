@@ -59,12 +59,17 @@ The results will be 3D gaussian splats (3DGS) in the output folder. The 3DGS `.p
 
 Additionally you can render videos with a camera trajectory. While the gaussians prediction works for all CPU, CUDA, and MPS, rendering videos via the `--render` option currently requires a CUDA GPU. The gsplat renderer takes a while to initialize at the first launch.
 
+On Windows, rendering may trigger a one-time JIT compilation of gsplat's CUDA extension. If so, you will need the Visual Studio C++ Build Tools and an NVIDIA CUDA toolkit (nvcc) available on your PATH (in addition to a CUDA-enabled PyTorch install).
+
 ```
-sharp predict -i /path/to/input/images -o /path/to/output/gaussians --render
+sharp predict -i /path/to/input/images -o /path/to/output/gaussians --render --trajectory-variants
 
 # Or from the intermediate gaussians:
-sharp render -i /path/to/output/gaussians -o /path/to/output/renderings
+sharp render -i /path/to/output/gaussians -o /path/to/output/renderings --trajectory-variants
 ```
+
+The `--trajectory-variants` option renders 5 different camera motions (varying trajectory type and motion magnitude) and
+writes outputs with `_v00`..`_v04` suffixes.
 
 ## Evaluation
 

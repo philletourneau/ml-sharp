@@ -6,10 +6,16 @@ Copyright (C) 2025 Apple Inc. All Rights Reserved.
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import os
+import platform
+import shutil
+import sys
+from glob import glob
 from pathlib import Path
 from typing import NamedTuple
 
-import gsplat
 import torch
 from torch import nn
 
@@ -24,6 +30,146 @@ class RenderingOutputs(NamedTuple):
     color: torch.Tensor
     depth: torch.Tensor
     alpha: torch.Tensor
+
+
+_GSPLAT_MODULE = None
+
+
+def _import_gsplat():
+    global _GSPLAT_MODULE
+    if _GSPLAT_MODULE is None:
+        _GSPLAT_MODULE = importlib.import_module("gsplat")
+    return _GSPLAT_MODULE
+
+
+def _is_prebuilt_gsplat_cuda_extension_available() -> bool:
+    """Return True if gsplat ships a prebuilt CUDA extension."""
+    try:
+        importlib.import_module("gsplat.csrc")
+    except Exception:
+        return False
+    return True
+
+
+def _get_cached_gsplat_cuda_extension_path() -> Path | None:
+    """Return the path to a previously built gsplat CUDA extension, if present."""
+    try:
+        from torch.utils.cpp_extension import _get_build_directory  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+    build_dir = Path(_get_build_directory("gsplat_cuda", verbose=False))
+    for candidate in [
+        build_dir / "gsplat_cuda.pyd",  # Windows
+        build_dir / "gsplat_cuda.so",  # Linux
+    ]:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _ensure_gsplat_csrc_available() -> bool:
+    """Ensure `gsplat.csrc` can be imported.
+
+    On Windows, gsplat may build a `gsplat_cuda.pyd` extension into PyTorch's
+    extensions cache. Importing gsplat's CUDA backend can still require MSVC
+    `cl.exe` on PATH (even if already built). To make runtime more robust, we
+    opportunistically load the cached extension as `gsplat.csrc` if present.
+    """
+    try:
+        importlib.import_module("gsplat.csrc")
+        return True
+    except Exception:
+        pass
+
+    ext_path = _get_cached_gsplat_cuda_extension_path()
+    if ext_path is None:
+        return False
+
+    try:
+        # The compiled extension is named `gsplat_cuda` (PyInit_gsplat_cuda), so we must
+        # load it under that name, then alias it to `gsplat.csrc` for gsplat's imports.
+        spec = importlib.util.spec_from_file_location("gsplat_cuda", ext_path)
+        if spec is None or spec.loader is None:
+            return False
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules["gsplat_cuda"] = module
+        sys.modules["gsplat.csrc"] = module
+        gsplat = _import_gsplat()
+        setattr(gsplat, "csrc", module)
+        return True
+    except Exception:
+        return False
+
+
+def _is_wsl() -> bool:
+    """Return True if running under WSL."""
+    return "WSL_DISTRO_NAME" in os.environ or "microsoft" in platform.release().lower()
+
+
+def _find_nvcc() -> str | None:
+    """Return a path to nvcc, or None.
+
+    We explicitly ignore Windows `nvcc.exe` on `/mnt/c/...` since it cannot build
+    Linux extensions.
+    """
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home:
+        for candidate in [
+            os.path.join(cuda_home, "bin", "nvcc"),
+            os.path.join(cuda_home, "bin", "nvcc.exe"),
+        ]:
+            if os.path.isfile(candidate):
+                return candidate
+
+    for candidate in [
+        "/usr/local/cuda/bin/nvcc",
+        *glob("/usr/local/cuda-*/bin/nvcc"),
+        "/opt/cuda/bin/nvcc",
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+
+    for candidate in [shutil.which("nvcc"), shutil.which("nvcc.exe")]:
+        if candidate:
+            return candidate
+
+    return None
+
+
+def is_gsplat_cuda_toolkit_available() -> bool:
+    """Return True if a CUDA toolkit (nvcc) is available."""
+    nvcc = _find_nvcc()
+    if nvcc is None:
+        return False
+    if _is_wsl() and nvcc.lower().endswith(".exe"):
+        return False
+    return True
+
+
+def is_gsplat_cuda_extension_available() -> bool:
+    """Return True if gsplat can run on CUDA (prebuilt extension or nvcc for JIT)."""
+    return (
+        _is_prebuilt_gsplat_cuda_extension_available()
+        or _get_cached_gsplat_cuda_extension_path() is not None
+        or is_gsplat_cuda_toolkit_available()
+    )
+
+
+def require_gsplat_cuda_extension() -> None:
+    """Raise a helpful error if gsplat's CUDA extension is not available."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("Rendering requires CUDA, but torch.cuda is not available.")
+
+    if _ensure_gsplat_csrc_available() or is_gsplat_cuda_extension_available():
+        return
+
+    raise RuntimeError(
+        "gsplat's CUDA extension is not available. Either install a gsplat build that ships "
+        "a prebuilt CUDA extension, or install a CUDA toolkit (nvcc) so gsplat can JIT-compile "
+        "its extension (on Windows, you also need MSVC Build Tools)."
+    )
 
 
 def write_renderings(rendering: RenderingOutputs, output_folder: Path, filename: str):
@@ -86,6 +232,9 @@ class GSplatRenderer(nn.Module):
             image_width: The desired output image width.
             image_height: The desired output image height.
         """
+        require_gsplat_cuda_extension()
+        gsplat = _import_gsplat()
+
         batch_size = len(gaussians.mean_vectors)
         outputs_list: list[RenderingOutputs] = []
 

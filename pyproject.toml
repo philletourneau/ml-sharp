@@ -12,6 +12,7 @@ dependencies = [
   "plyfile",
   "scipy",
   "timm",
+  "tqdm",
   "torch",
   "torchvision",
 ]

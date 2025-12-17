@@ -20,7 +20,7 @@ from sharp.models import (
     RGBGaussianPredictor,
     create_predictor,
 )
-from sharp.utils import io
+from sharp.utils import camera, io
 from sharp.utils import logging as logging_utils
 from sharp.utils.gaussians import (
     Gaussians3D,
@@ -34,6 +34,52 @@ from .render import render_gaussians
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_MODEL_URL = "https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh.pt"
+
+
+def _iter_trajectory_variants(
+    base_params: camera.TrajectoryParams,
+    *,
+    enabled: bool,
+    count: int,
+):
+    """Yield (params, output_suffix) for trajectory variants."""
+    # Keep this logic local to avoid forcing a shared API surface between CLIs.
+    if not enabled:
+        yield base_params, ""
+        return
+
+    if count < 1:
+        raise ValueError("count must be >= 1")
+
+    import dataclasses
+    import random
+
+    variant_types: list[camera.TrajetoryType] = [
+        "rotate_forward",
+        "rotate",
+        "swipe",
+        "shake",
+        "rotate_forward",
+    ]
+
+    for variant_index in range(count):
+        rng = random.Random(variant_index)
+        disparity_scale = rng.uniform(0.6, 1.6)
+        zoom_scale = rng.uniform(0.6, 1.6)
+        distance_offset = rng.uniform(-0.2, 0.2)
+        repeats = rng.choice([1, 2, 3])
+        lookat_mode: camera.LookAtMode = rng.choice(["point", "ahead"])
+        traj_type = variant_types[variant_index % len(variant_types)]
+        params = dataclasses.replace(
+            base_params,
+            type=traj_type,
+            lookat_mode=lookat_mode,
+            max_disparity=base_params.max_disparity * disparity_scale,
+            max_zoom=base_params.max_zoom * zoom_scale,
+            distance_m=base_params.distance_m + distance_offset,
+            num_repeats=repeats,
+        )
+        yield params, f"_v{variant_index:02d}"
 
 
 @click.command()
@@ -67,6 +113,32 @@ DEFAULT_MODEL_URL = "https://ml-site.cdn-apple.com/models/sharp/sharp_2572gikvuh
     help="Whether to render trajectory for checkpoint.",
 )
 @click.option(
+    "--fps",
+    type=float,
+    default=60.0,
+    show_default=True,
+    help="Frames per second for trajectory videos (only used with --render).",
+)
+@click.option(
+    "--duration-scale",
+    type=float,
+    default=8.0,
+    show_default=True,
+    help="Scale trajectory length by multiplying the number of frames (only used with --render).",
+)
+@click.option(
+    "--trajectory-variants/--no-trajectory-variants",
+    default=False,
+    show_default=True,
+    help="Render 5 variations of the trajectory (writes 5 output videos; only used with --render).",
+)
+@click.option(
+    "--progress/--no-progress",
+    default=True,
+    show_default=True,
+    help="Show per-frame progress (elapsed and ETA; only used with --render).",
+)
+@click.option(
     "--device",
     type=str,
     default="default",
@@ -78,6 +150,10 @@ def predict_cli(
     output_path: Path,
     checkpoint_path: Path,
     with_rendering: bool,
+    fps: float,
+    duration_scale: float,
+    trajectory_variants: bool,
+    progress: bool,
     device: str,
     verbose: bool,
 ):
@@ -112,6 +188,16 @@ def predict_cli(
     if with_rendering and device != "cuda":
         LOGGER.warning("Can only run rendering with gsplat on CUDA. Rendering is disabled.")
         with_rendering = False
+    if with_rendering and device == "cuda":
+        from sharp.utils import gsplat as gsplat_utils
+
+        if not gsplat_utils.is_gsplat_cuda_extension_available():
+            LOGGER.warning(
+                "gsplat CUDA extension is not available; rendering is disabled. "
+                "Install a CUDA toolkit (nvcc) so gsplat can compile its extension "
+                "(on Windows this also requires Visual Studio C++ Build Tools)."
+            )
+            with_rendering = False
 
     # Load or download checkpoint
     if checkpoint_path is None:
@@ -148,11 +234,25 @@ def predict_cli(
         save_ply(gaussians, f_px, (height, width), output_path / f"{image_path.stem}.ply")
 
         if with_rendering:
-            output_video_path = (output_path / image_path.stem).with_suffix(".mp4")
-            LOGGER.info("Rendering trajectory to %s", output_video_path)
-
             metadata = SceneMetaData(intrinsics[0, 0].item(), (width, height), "linearRGB")
-            render_gaussians(gaussians, metadata, output_video_path)
+            base_params = camera.TrajectoryParams()
+            for variant_index, (params, suffix) in enumerate(
+                _iter_trajectory_variants(base_params, enabled=trajectory_variants, count=5)
+            ):
+                output_video_path = output_path / f"{image_path.stem}{suffix}.mp4"
+                if trajectory_variants:
+                    LOGGER.info("Rendering trajectory variant %d to %s", variant_index, output_video_path)
+                else:
+                    LOGGER.info("Rendering trajectory to %s", output_video_path)
+                render_gaussians(
+                    gaussians,
+                    metadata,
+                    output_video_path,
+                    params=params,
+                    fps=fps,
+                    duration_scale=duration_scale,
+                    progress=progress,
+                )
 
 
 @torch.no_grad()

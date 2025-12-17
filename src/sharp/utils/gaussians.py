@@ -216,7 +216,8 @@ def load_ply(path: Path) -> tuple[Gaussians3D, SceneMetaData]:
     properties = ["x", "y", "z"]
     properties.extend([f"f_dc_{i}" for i in range(3)])
     properties.extend([f"scale_{i}" for i in range(3)])
-    properties.extend([f"rot_{i}" for i in range(3)])
+    properties.extend([f"rot_{i}" for i in range(4)])
+    properties.append("opacity")
 
     for prop in properties:
         if prop not in vertices:
@@ -319,15 +320,18 @@ def load_ply(path: Path) -> tuple[Gaussians3D, SceneMetaData]:
 
     # Parse color space.
     color_space_index = supplement_data.get("color_space", 1)
-    color_space = cs_utils.decode_color_space(color_space_index)
-    if color_space == "sRGB":
-        colors = cs_utils.sRGB2linearRGB(colors)
+    source_color_space = cs_utils.decode_color_space(color_space_index)
 
     mean_vectors = torch.from_numpy(mean_vectors).view(1, -1, 3).float()
     quaternions = torch.from_numpy(quaternions).view(1, -1, 4).float()
     singular_values = torch.exp(torch.from_numpy(scale_logits).view(1, -1, 3)).float()
     opacities = torch.sigmoid(torch.from_numpy(opacity_logits).view(1, -1)).float()
     colors = torch.from_numpy(colors).view(1, -1, 3).float()
+    if source_color_space == "sRGB":
+        colors = cs_utils.sRGB2linearRGB(colors)
+        color_space: cs_utils.ColorSpace = "linearRGB"
+    else:
+        color_space = source_color_space
 
     gaussians = Gaussians3D(
         mean_vectors=mean_vectors,
