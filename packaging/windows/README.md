@@ -1,6 +1,9 @@
 ## Windows GPU self-contained GUI build
 
-This repo includes a Windows-only double-click GUI launcher (`sharp-gui.exe`) built with PyInstaller.
+This repo includes Windows-only double-click GUI launchers built with PyInstaller:
+
+- `sharp-gui.exe` (predict/render)
+- `sharp-usdz-gui.exe` (mesh/USDZ workflows)
 
 ### What "self-contained" means
 
@@ -26,7 +29,16 @@ Output:
 
 - `dist\sharp-gui\sharp-gui.exe`
 
+For the mesh/USDZ GUI:
+
+```powershell
+.\packaging\windows\build-gpu-usdz-gui.ps1
+```
+
+Output:
+
+- `dist\sharp-usdz-gui\sharp-usdz-gui.exe`
+
 ### Running
 
 Double-click `sharp-gui.exe`. It runs `sharp predict` or `sharp render` in-process and shows output/progress in the GUI.
-

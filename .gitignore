@@ -44,10 +44,12 @@ htmlcov/
 .coverage.*
 .cache
 .venv-build-gui
+.venv-build-gui-usdz
 dist
 build
 packaging/windows/assets
 !packaging/windows/sharp-gui.spec
+!packaging/windows/sharp-usdz-gui.spec
 nosetests.xml
 coverage.xml
 *.cover

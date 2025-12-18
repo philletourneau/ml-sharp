@@ -5,7 +5,7 @@ function Write-Info($msg) { Write-Host "[build] $msg" }
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\\..")).Path
 
 $repoRoot = (Get-Location).Path
-$venv = Join-Path $repoRoot ".venv-build-gui"
+$venv = Join-Path $repoRoot ".venv-build-gui-usdz"
 $assetsDir = Join-Path $repoRoot "packaging\\windows\\assets"
 
 New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
@@ -19,8 +19,8 @@ $py = Join-Path $venv "Scripts\\python.exe"
 Write-Info "Installing CUDA-enabled PyTorch into build venv"
 & $py -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
 
-Write-Info "Installing project + build tools"
-& $py -m pip install -e .
+Write-Info "Installing project + mesh deps + build tools"
+& $py -m pip install -e .[mesh]
 & $py -m pip install pyinstaller ninja
 
 Write-Info "Patching gsplat Windows compile flags in build venv (workaround)"
@@ -71,7 +71,7 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to copy gsplat_cuda.pyd into assets." }
 if (-not (Test-Path (Join-Path $assetsDir "gsplat_cuda.pyd"))) { throw "assets\\gsplat_cuda.pyd not found after copy." }
 
 Write-Info "Running PyInstaller"
-& $py -m PyInstaller --clean --noconfirm packaging\\windows\\sharp-gui.spec
+& $py -m PyInstaller --clean --noconfirm packaging\\windows\\sharp-usdz-gui.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 
-Write-Info "Done. Output: dist\\sharp-gui\\sharp-gui.exe"
+Write-Info "Done. Output: dist\\sharp-usdz-gui\\sharp-usdz-gui.exe"

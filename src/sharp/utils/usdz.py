@@ -10,9 +10,12 @@ import io
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from plyfile import PlyData  # type: ignore[import-not-found]
+
+CoordinateSystem = Literal["sharp", "usd"]
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,33 @@ def _read_mesh_ply(path: Path) -> MeshData:
 
     return MeshData(vertices=vertices, faces=faces, vertex_colors=colors, vertex_normals=normals)
 
+def _convert_coordinates(mesh: MeshData, *, coordinate_system: CoordinateSystem) -> MeshData:
+    if coordinate_system == "sharp":
+        return mesh
+    if coordinate_system != "usd":
+        raise ValueError(f"Unsupported coordinate_system: {coordinate_system!r}")
+
+    # SHARP uses an OpenCV-like coordinate system: x right, y down, z forward.
+    # USD commonly uses a right-handed Y-up system; in practice most renderers
+    # and viewers expect "forward" to align with -Z (camera looking down -Z).
+    #
+    # Convert with a right-handed axis flip that preserves winding:
+    #   (x, y, z) -> (x, -y, -z)
+    v = mesh.vertices.astype(np.float32, copy=True)
+    v[:, 1] *= -1.0
+    v[:, 2] *= -1.0
+
+    n = None
+    if mesh.vertex_normals is not None:
+        n = mesh.vertex_normals.astype(np.float32, copy=True)
+        n[:, 1] *= -1.0
+        n[:, 2] *= -1.0
+        lens = np.linalg.norm(n, axis=1, keepdims=True)
+        lens = np.where(lens > 1e-8, lens, 1.0)
+        n = n / lens
+
+    return MeshData(vertices=v, faces=mesh.faces, vertex_colors=mesh.vertex_colors, vertex_normals=n)
+
 
 def mesh_to_usda(
     mesh: MeshData,
@@ -82,8 +112,10 @@ def mesh_to_usda(
     root_name: str = "Root",
     mesh_name: str = "Mesh",
     material_name: str = "Mat",
+    coordinate_system: CoordinateSystem = "usd",
 ) -> str:
     """Serialize a mesh (with optional vertex colors) into a minimal usda stage."""
+    mesh = _convert_coordinates(mesh, coordinate_system=coordinate_system)
     vertices = mesh.vertices
     faces = mesh.faces
 
@@ -188,9 +220,14 @@ def mesh_ply_to_usdz(
     output_usdz: Path,
     root_name: str = "Root",
     mesh_name: str = "Mesh",
+    coordinate_system: CoordinateSystem = "usd",
 ) -> None:
     """Convert a mesh PLY (with vertex colors) to a USDZ package."""
     mesh = _read_mesh_ply(input_mesh_ply)
-    usda = mesh_to_usda(mesh, root_name=root_name, mesh_name=mesh_name)
+    usda = mesh_to_usda(
+        mesh,
+        root_name=root_name,
+        mesh_name=mesh_name,
+        coordinate_system=coordinate_system,
+    )
     write_usdz(output_usdz, usda_text=usda)
-

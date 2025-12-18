@@ -14,7 +14,7 @@ from plyfile import PlyData  # type: ignore[import-not-found]
 from sharp.utils import camera, gsplat
 from sharp.utils import logging as logging_utils
 from sharp.utils.meshing import MeshFromGaussiansOptions, gaussians_ply_to_mesh_tsdf
-from sharp.utils.usdz import MeshData, mesh_ply_to_usdz, mesh_to_usda, write_usdz
+from sharp.utils.usdz import CoordinateSystem, MeshData, mesh_ply_to_usdz, mesh_to_usda, write_usdz
 
 LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +56,13 @@ def _is_gaussians_ply(path: Path) -> bool:
     default="Mesh",
     show_default=True,
     help="USD mesh prim name.",
+)
+@click.option(
+    "--coordinate-system",
+    type=click.Choice(["usd", "sharp"], case_sensitive=False),
+    default="usd",
+    show_default=True,
+    help="Coordinate system for the USD stage. 'usd' converts from SHARP (x right, y down, z forward) to a USD-friendly right-handed Y-up space.",
 )
 @click.option(
     "--mesh-output",
@@ -149,6 +156,7 @@ def usdz_cli(
     output_path: Path,
     root_name: str,
     mesh_name: str,
+    coordinate_system: str,
     mesh_output: Path | None,
     max_render_dim: int,
     depth_trunc: float,
@@ -176,6 +184,7 @@ def usdz_cli(
             output_usdz=output_path,
             root_name=root_name,
             mesh_name=mesh_name,
+            coordinate_system=coordinate_system.lower(),  # type: ignore[arg-type]
         )
         LOGGER.info("Wrote USDZ to %s", output_path)
         return
@@ -235,6 +244,7 @@ def usdz_cli(
         MeshData(vertices=vertices, faces=faces, vertex_colors=colors, vertex_normals=normals),
         root_name=root_name,
         mesh_name=mesh_name,
+        coordinate_system=coordinate_system.lower(),  # type: ignore[arg-type]
     )
     write_usdz(output_path, usda_text=usda)
     LOGGER.info("Wrote USDZ to %s", output_path)
