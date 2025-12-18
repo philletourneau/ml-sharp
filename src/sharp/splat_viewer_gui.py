@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -27,6 +28,150 @@ class RunConfig:
     gpu: str | None  # "cpu" or an integer string
     iterations: int | None
     extra_args: str
+
+
+_PLY_SCALAR_TYPE_SIZES: dict[str, int] = {
+    "char": 1,
+    "int8": 1,
+    "uchar": 1,
+    "uint8": 1,
+    "short": 2,
+    "int16": 2,
+    "ushort": 2,
+    "uint16": 2,
+    "int": 4,
+    "int32": 4,
+    "uint": 4,
+    "uint32": 4,
+    "float": 4,
+    "float32": 4,
+    "double": 8,
+    "float64": 8,
+}
+
+
+def _parse_ply_header(path: Path) -> tuple[str, list[tuple[str, int, list[str]]], int]:
+    """Parse enough of a PLY header to locate element boundaries.
+
+    Returns:
+        format_line: The `format ...` header line (without newline).
+        elements: List of (name, count, property_lines).
+        data_start: Byte offset where element data starts (after end_header newline).
+    """
+    with path.open("rb") as f:
+        first = f.readline()
+        if not first:
+            raise RuntimeError("Empty file.")
+        if first.strip() != b"ply":
+            raise RuntimeError("Not a PLY file (missing 'ply' header).")
+
+        format_line_b = f.readline()
+        if not format_line_b:
+            raise RuntimeError("Truncated PLY header (missing format line).")
+        format_line = format_line_b.decode("ascii", errors="strict").strip()
+        if not format_line.startswith("format "):
+            raise RuntimeError("Invalid PLY header (missing format line).")
+
+        elements: list[tuple[str, int, list[str]]] = []
+        current_name: str | None = None
+        current_count: int | None = None
+        current_props: list[str] = []
+
+        while True:
+            line_b = f.readline()
+            if not line_b:
+                raise RuntimeError("Truncated PLY header (missing end_header).")
+            line = line_b.decode("ascii", errors="strict").strip()
+            if not line or line.startswith("comment"):
+                continue
+            if line == "end_header":
+                if current_name is not None and current_count is not None:
+                    elements.append((current_name, current_count, current_props))
+                data_start = f.tell()
+                return format_line, elements, data_start
+
+            parts = line.split()
+            if parts[0] == "element":
+                if len(parts) != 3:
+                    raise RuntimeError(f"Invalid element line: {line}")
+                if current_name is not None and current_count is not None:
+                    elements.append((current_name, current_count, current_props))
+                current_name = parts[1]
+                current_count = int(parts[2])
+                current_props = []
+            elif parts[0] == "property":
+                if current_name is None:
+                    continue
+                current_props.append(line)
+
+
+def _element_fixed_record_size(prop_lines: list[str]) -> int:
+    size = 0
+    for line in prop_lines:
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != "property":
+            continue
+        if parts[1] == "list":
+            raise RuntimeError(
+                "PLY contains variable-length list properties; cannot strip metadata safely."
+            )
+        prop_type = parts[1].lower()
+        if prop_type not in _PLY_SCALAR_TYPE_SIZES:
+            raise RuntimeError(f"Unsupported PLY scalar type: {prop_type}")
+        size += _PLY_SCALAR_TYPE_SIZES[prop_type]
+    return size
+
+
+def _needs_vertex_only_ply(path: Path) -> bool:
+    if path.suffix.lower() != ".ply":
+        return False
+    format_line, elements, _data_start = _parse_ply_header(path)
+    if not format_line.startswith("format binary_"):
+        # splat-transform supports ASCII PLY too, but SHARP emits binary; keep this simple.
+        return False
+    return not (len(elements) == 1 and elements[0][0] == "vertex")
+
+
+def _write_vertex_only_ply(src: Path, dst: Path) -> None:
+    format_line, elements, data_start = _parse_ply_header(src)
+    if not format_line.startswith("format binary_"):
+        raise RuntimeError(f"Unsupported PLY format for stripping: {format_line}")
+
+    element_names = [name for name, _count, _props in elements]
+    if "vertex" not in element_names:
+        raise RuntimeError("PLY does not contain a 'vertex' element.")
+    vertex_index = element_names.index("vertex")
+
+    sizes = []
+    for name, count, props in elements:
+        record_size = _element_fixed_record_size(props)
+        sizes.append((name, count, record_size, count * record_size))
+
+    vertex_name, vertex_count, vertex_props = elements[vertex_index]
+    vertex_total_size = sizes[vertex_index][3]
+    vertex_offset = data_start + sum(total for _n, _c, _r, total in sizes[:vertex_index])
+
+    header_lines = [
+        "ply",
+        format_line,
+        "comment generated by sharp-splat-viewer-gui (vertex-only copy for splat-transform)",
+        f"element {vertex_name} {vertex_count}",
+        *vertex_props,
+        "end_header",
+    ]
+    header = ("\n".join(header_lines) + "\n").encode("ascii")
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with src.open("rb") as f_in, dst.open("wb") as f_out:
+        f_out.write(header)
+        f_in.seek(vertex_offset)
+        remaining = vertex_total_size
+        while remaining:
+            chunk = f_in.read(min(8 * 1024 * 1024, remaining))
+            if not chunk:
+                raise RuntimeError("Unexpected EOF while copying vertex data.")
+            f_out.write(chunk)
+            remaining -= len(chunk)
 
 
 def _find_node_and_cli() -> tuple[Path, Path, Path]:
@@ -235,10 +380,31 @@ def main() -> None:
         set_running(True)
         started = time.time()
         try:
-            cmd, cwd = _build_command(cfg)
+            effective_cfg = cfg
+            temp_dir: tempfile.TemporaryDirectory[str] | None = None
+            if _needs_vertex_only_ply(cfg.input_path):
+                log_line(
+                    "Input PLY contains extra metadata elements; generating a vertex-only copy for "
+                    "splat-transform..."
+                )
+                temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
+                stripped = Path(temp_dir.name) / f"{cfg.input_path.stem}.vertex-only.ply"
+                _write_vertex_only_ply(cfg.input_path, stripped)
+                effective_cfg = RunConfig(
+                    input_path=stripped,
+                    output_html=cfg.output_html,
+                    viewer_settings=cfg.viewer_settings,
+                    unbundled=cfg.unbundled,
+                    overwrite=cfg.overwrite,
+                    gpu=cfg.gpu,
+                    iterations=cfg.iterations,
+                    extra_args=cfg.extra_args,
+                )
+
+            cmd, cwd = _build_command(effective_cfg)
             log_line("Running: " + " ".join(cmd))
 
-            cfg.output_html.parent.mkdir(parents=True, exist_ok=True)
+            effective_cfg.output_html.parent.mkdir(parents=True, exist_ok=True)
 
             proc = subprocess.Popen(
                 cmd,
@@ -258,6 +424,11 @@ def main() -> None:
         except Exception as exc:
             log_line(f"ERROR: {exc}")
         finally:
+            try:
+                if temp_dir is not None:
+                    temp_dir.cleanup()
+            except Exception:
+                pass
             set_running(False)
 
     def on_run() -> None:
