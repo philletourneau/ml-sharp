@@ -30,12 +30,17 @@ from pathlib import Path
 
 p = Path(gsplat.__file__).parent / "cuda" / "_backend.py"
 txt = p.read_text(encoding="utf-8")
+changed = False
 old = 'extra_cflags = [opt_level, "-Wno-attributes"]'
-new = 'extra_cflags = ["/Od" if FAST_COMPILE else "/O2"]'
-if old in txt:
+new = 'extra_cflags = [opt_level]'
+if old in txt and new not in txt:
     txt = txt.replace(old, new)
-p.write_text(txt, encoding="utf-8")
-print("patched", p)
+    changed = True
+if changed:
+    p.write_text(txt, encoding="utf-8")
+    print("patched", p)
+else:
+    print("no patch needed", p)
 "@
 
 Write-Info "Locating Visual Studio Build Tools"
