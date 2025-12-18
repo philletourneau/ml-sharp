@@ -44,10 +44,13 @@ htmlcov/
 .coverage.*
 .cache
 .venv-build-gui
+.venv-build-gui-usdz
+.venv-build-splat-viewer-gui
 dist
 build
 packaging/windows/assets
 !packaging/windows/sharp-gui.spec
+!packaging/windows/sharp-splat-viewer-gui.spec
 nosetests.xml
 coverage.xml
 *.cover
@@ -169,4 +172,5 @@ cython_debug/
 
 .DS_STORE
 *.pt
+cuda-keyring_*.deb
 .aider*

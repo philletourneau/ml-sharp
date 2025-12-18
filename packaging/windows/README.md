@@ -30,3 +30,19 @@ Output:
 
 Double-click `sharp-gui.exe`. It runs `sharp predict` or `sharp render` in-process and shows output/progress in the GUI.
 
+## Windows HTML viewer GUI (splat-transform)
+
+This repo also includes a Windows-only double-click GUI (`sharp-splat-viewer-gui.exe`) that wraps PlayCanvas
+`@playcanvas/splat-transform` to generate a single-page HTML viewer (`.html`) from a `.ply`.
+
+### Build
+
+From the repo root:
+
+```powershell
+.\packaging\windows\build-splat-viewer-gui.ps1
+```
+
+Output:
+
+- `dist\sharp-splat-viewer-gui\sharp-splat-viewer-gui.exe`
