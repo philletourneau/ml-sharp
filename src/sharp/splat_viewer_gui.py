@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,103 @@ class RunConfig:
     gpu: str | None  # "cpu" or an integer string
     iterations: int | None
     extra_args: str
+
+
+def _apply_sharp_style_viewer_constraints(output_html: Path, *, unbundled: bool) -> None:
+    """Post-process SuperSplat Viewer to restrict camera controls (SHARP-style)."""
+
+    def patch_text_file(path: Path, patcher: Callable[[str], str]) -> None:
+        text = path.read_text(encoding="utf-8")
+        patched = patcher(text)
+        if patched != text:
+            path.write_text(patched, encoding="utf-8")
+
+    # Hide fly camera button in the UI (if present).
+    if output_html.is_file():
+        def hide_fly_button(text: str) -> str:
+            if 'id="flyCamera"' not in text:
+                return text
+            if 'id="flyCamera" style="display:none"' in text:
+                return text
+            if '<button id="flyCamera"' in text:
+                return text.replace(
+                    '<button id="flyCamera"',
+                    '<button id="flyCamera" style="display:none"',
+                    1,
+                )
+            return text
+
+        patch_text_file(output_html, hide_fly_button)
+
+    js_path = output_html if not unbundled else output_html.parent / "index.js"
+    if not js_path.is_file():
+        raise RuntimeError(f"Expected viewer script not found: {js_path}")
+
+    def patch_viewer_js(text: str) -> str:
+        patched = text
+
+        # Disable fly mode via keyboard auto-switch.
+        no_fly_auto_switch = (
+            "if (state.cameraMode !== 'fly' && this._state.axis.length() > 0) {\n"
+            "            state.cameraMode = 'fly';\n"
+            "        }"
+        )
+        patched = patched.replace(no_fly_auto_switch, "")
+
+        # Disable panning (right-mouse / 2-finger) so the target stays fixed.
+        if "const pan = 0;" not in patched:
+            if "const pan = this._state.mouse[2] || +(button[2] === -1) || double;" not in patched:
+                raise RuntimeError("Could not disable panning (expected pan expression not found).")
+            patched = patched.replace(
+                "const pan = this._state.mouse[2] || +(button[2] === -1) || double;",
+                "const pan = 0;",
+                1,
+            )
+
+        # Clamp fly -> orbit if anything tries to switch modes.
+        if "property === 'cameraMode' && value === 'fly'" not in patched:
+            if "// not allowed to set a new value on target" not in patched:
+                raise RuntimeError("Could not patch cameraMode (anchor comment not found).")
+            patched = patched.replace(
+                "// not allowed to set a new value on target",
+                "if (property === 'cameraMode' && value === 'fly') {\n"
+                "                value = 'orbit';\n"
+                "            }\n"
+                "            // not allowed to set a new value on target",
+                1,
+            )
+
+        # Limit orbit pitch + zoom around the current pose (approx SHARP turntable feel).
+        orbit_limits_marker = "this.controller.zoomRange = new Vec2(dist * 0.85, dist * 1.15);"
+        if orbit_limits_marker not in patched:
+            if "this.controller.attach(p, false);" not in patched:
+                raise RuntimeError("Could not patch orbit camera limits (attach(p,false) not found).")
+            patched = patched.replace(
+                "this.controller.attach(p, false);",
+                "this.controller.yawRange = new Vec2(-180, 180);\n"
+                "        const pitch = camera.angles.x;\n"
+                "        this.controller.pitchRange = new Vec2(pitch - 20, pitch + 20);\n"
+                "        const dist = Math.max(camera.distance, 1e-6);\n"
+                f"        {orbit_limits_marker}\n"
+                "        this.controller.attach(p, false);",
+                1,
+            )
+            if "this.controller.attach(p, true);" not in patched:
+                raise RuntimeError("Could not patch orbit camera limits (attach(p,true) not found).")
+            patched = patched.replace(
+                "this.controller.attach(p, true);",
+                "this.controller.yawRange = new Vec2(-180, 180);\n"
+                "        const pitch = camera.angles.x;\n"
+                "        this.controller.pitchRange = new Vec2(pitch - 20, pitch + 20);\n"
+                "        const dist = Math.max(camera.distance, 1e-6);\n"
+                f"        {orbit_limits_marker}\n"
+                "        this.controller.attach(p, true);",
+                1,
+            )
+
+        return patched
+
+    patch_text_file(js_path, patch_viewer_js)
 
 
 _PLY_SCALAR_TYPE_SIZES: dict[str, int] = {
@@ -420,6 +518,13 @@ def main() -> None:
             rc = proc.wait()
             if rc != 0:
                 raise RuntimeError(f"splat-transform exited with code {rc}")
+
+            if bool(limit_camera_var.get()):
+                log_line("Applying SHARP-style camera limits to the generated viewer...")
+                _apply_sharp_style_viewer_constraints(
+                    effective_cfg.output_html, unbundled=effective_cfg.unbundled
+                )
+
             log_line(f"Done in {time.time() - started:.1f}s")
         except Exception as exc:
             log_line(f"ERROR: {exc}")
@@ -451,6 +556,7 @@ def main() -> None:
     settings_var = tk.StringVar(value="")
     unbundled_var = tk.IntVar(value=0)
     overwrite_var = tk.IntVar(value=1)
+    limit_camera_var = tk.IntVar(value=1)
     gpu_var = tk.StringVar(value="default")
     iterations_var = tk.StringVar(value="")
     extra_args_var = tk.StringVar(value="")
@@ -487,6 +593,9 @@ def main() -> None:
     opts.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
     ttk.Checkbutton(opts, text="Overwrite output", variable=overwrite_var).pack(side="left")
     ttk.Checkbutton(opts, text="Unbundled output (-U)", variable=unbundled_var).pack(
+        side="left", padx=(12, 0)
+    )
+    ttk.Checkbutton(opts, text="Limit camera controls (SHARP-style)", variable=limit_camera_var).pack(
         side="left", padx=(12, 0)
     )
     ttk.Label(opts, text="GPU").pack(side="left", padx=(12, 0))
