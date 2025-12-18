@@ -130,8 +130,9 @@ def gaussians_to_mesh_tsdf(
         )
         depth_m = rendering.depth[0].squeeze(0).clamp(min=0.0)
 
-        color_np = color_u8.detach().cpu().numpy()
-        depth_np = depth_m.detach().cpu().numpy().astype(np.float32, copy=False)
+        # Open3D requires C-contiguous buffers for Image initialization.
+        color_np = np.ascontiguousarray(color_u8.detach().cpu().numpy())
+        depth_np = np.ascontiguousarray(depth_m.detach().cpu().numpy(), dtype=np.float32)
 
         if intrinsic_o3d is None:
             fx = float(camera_info.intrinsics[0, 0].item())
