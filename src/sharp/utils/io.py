@@ -182,15 +182,33 @@ class OutputWriter(Protocol):
 class VideoWriter(OutputWriter):
     """Output writer for video output."""
 
-    def __init__(self, output_path: Path, fps: float = 30.0, render_depth: bool = True) -> None:
+    def __init__(
+        self,
+        output_path: Path,
+        fps: float = 30.0,
+        render_depth: bool = True,
+        codec: str | None = None,
+        bitrate: str | None = None,
+        macro_block_size: int | None = 16,
+    ) -> None:
         """Initialize VideoWriter."""
         output_path.parent.mkdir(exist_ok=True, parents=True)
         self.output_path = output_path
-        self.image_writer = iio.get_writer(output_path, fps=fps)
+        writer_kwargs: dict[str, object] = {"fps": fps}
+        if codec:
+            writer_kwargs["codec"] = codec
+        if bitrate:
+            writer_kwargs["bitrate"] = bitrate
+        if macro_block_size is not None:
+            writer_kwargs["macro_block_size"] = int(macro_block_size)
+        self.image_writer = iio.get_writer(output_path, **writer_kwargs)
 
         self.max_depth_estimate = None
         if render_depth:
-            self.depth_writer = iio.get_writer(output_path.with_suffix(".depth.mp4"), fps=fps)
+            depth_path = output_path.with_name(output_path.stem + ".depth" + output_path.suffix)
+            self.depth_writer = iio.get_writer(depth_path, **writer_kwargs)
+        else:
+            self.depth_writer = None
 
     def add_frame(self, image: torch.Tensor, depth: torch.Tensor) -> None:
         """Add a single frame to output."""
@@ -211,3 +229,5 @@ class VideoWriter(OutputWriter):
     def close(self):
         """Finish writing."""
         self.image_writer.close()
+        if self.depth_writer is not None:
+            self.depth_writer.close()

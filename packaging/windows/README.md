@@ -2,7 +2,7 @@
 
 This repo includes a Windows-only double-click GUI launcher (`sharp-gui.exe`) built with PyInstaller.
 
-### What “self-contained” means
+### What "self-contained" means
 
 - The build bundles Python + all Python dependencies (including CUDA-enabled PyTorch).
 - You still need an NVIDIA driver installed on the target machine.
@@ -12,7 +12,7 @@ This repo includes a Windows-only double-click GUI launcher (`sharp-gui.exe`) bu
 
 - Python 3.12 (`py -3.12`)
 - NVIDIA driver + CUDA toolkit (nvcc)
-- Visual Studio Build Tools 2022 with “Desktop development with C++”
+- Visual Studio Build Tools 2022 with "Desktop development with C++"
 
 ### Build
 

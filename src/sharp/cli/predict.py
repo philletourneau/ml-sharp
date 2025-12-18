@@ -30,7 +30,7 @@ from sharp.utils.gaussians import (
     unproject_gaussians,
 )
 
-from .render import render_gaussians
+from .render import _make_trajectory_params, _resolve_output_path, render_gaussians
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,11 +121,86 @@ def _iter_trajectory_variants(
     help="Frames per second for trajectory videos (only used with --render).",
 )
 @click.option(
+    "--video-ext",
+    type=click.Choice(["mp4", "mov"], case_sensitive=False),
+    default="mp4",
+    show_default=True,
+    help="Video container extension (only used with --render).",
+)
+@click.option(
+    "--codec",
+    type=str,
+    default=None,
+    help="FFmpeg codec name passed to imageio (optional; only used with --render).",
+)
+@click.option(
+    "--bitrate",
+    type=str,
+    default=None,
+    help="FFmpeg bitrate passed to imageio, e.g. '8M' (optional; only used with --render).",
+)
+@click.option(
+    "--macro-block-size",
+    type=int,
+    default=16,
+    show_default=True,
+    help="FFmpeg macro block size for imageio (only used with --render).",
+)
+@click.option(
+    "--depth/--no-depth",
+    "render_depth",
+    default=True,
+    show_default=True,
+    help="Whether to render a depth video alongside the color video (only used with --render).",
+)
+@click.option(
     "--duration-scale",
     type=float,
     default=8.0,
     show_default=True,
     help="Scale trajectory length by multiplying the number of frames (only used with --render).",
+)
+@click.option(
+    "--trajectory-type",
+    type=click.Choice(["swipe", "shake", "rotate", "rotate_forward"], case_sensitive=False),
+    default=None,
+    help="Camera trajectory type override (only used with --render).",
+)
+@click.option(
+    "--lookat-mode",
+    type=click.Choice(["point", "ahead"], case_sensitive=False),
+    default=None,
+    help="Look-at mode override (only used with --render).",
+)
+@click.option(
+    "--max-disparity",
+    type=float,
+    default=None,
+    help="Override trajectory max disparity (only used with --render).",
+)
+@click.option(
+    "--max-zoom",
+    type=float,
+    default=None,
+    help="Override trajectory max zoom (only used with --render).",
+)
+@click.option(
+    "--distance-m",
+    type=float,
+    default=None,
+    help="Override trajectory camera distance in meters (only used with --render).",
+)
+@click.option(
+    "--num-steps",
+    type=int,
+    default=None,
+    help="Override trajectory number of steps (frames per repeat; only used with --render).",
+)
+@click.option(
+    "--num-repeats",
+    type=int,
+    default=None,
+    help="Override trajectory number of repeats (only used with --render).",
 )
 @click.option(
     "--trajectory-variants/--no-trajectory-variants",
@@ -147,6 +222,26 @@ def _iter_trajectory_variants(
     help="Prefix for output filenames (e.g. 'previz_'; only used with --render).",
 )
 @click.option(
+    "--overwrite/--no-overwrite",
+    default=True,
+    show_default=True,
+    help="Overwrite existing output files (only used with --render).",
+)
+@click.option(
+    "--low-pass-filter-eps",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Low-pass filter epsilon for gsplat rasterization (only used with --render).",
+)
+@click.option(
+    "--cuda-device",
+    type=int,
+    default=0,
+    show_default=True,
+    help="CUDA device index to use for rendering (only used with --render).",
+)
+@click.option(
     "--progress/--no-progress",
     default=True,
     show_default=True,
@@ -162,13 +257,28 @@ def _iter_trajectory_variants(
 def predict_cli(
     input_path: Path,
     output_path: Path,
-    checkpoint_path: Path,
+    checkpoint_path: Path | None,
     with_rendering: bool,
     fps: float,
+    video_ext: str,
+    codec: str | None,
+    bitrate: str | None,
+    macro_block_size: int,
+    render_depth: bool,
     duration_scale: float,
+    trajectory_type: str | None,
+    lookat_mode: str | None,
+    max_disparity: float | None,
+    max_zoom: float | None,
+    distance_m: float | None,
+    num_steps: int | None,
+    num_repeats: int | None,
     trajectory_variants: bool,
     trajectory_variants_count: int,
     output_prefix: str,
+    overwrite: bool,
+    low_pass_filter_eps: float,
+    cuda_device: int,
     progress: bool,
     device: str,
     verbose: bool,
@@ -259,25 +369,41 @@ def predict_cli(
 
         if with_rendering:
             metadata = SceneMetaData(intrinsics[0, 0].item(), (width, height), "linearRGB")
-            base_params = camera.TrajectoryParams()
+            base_params = _make_trajectory_params(
+                base=camera.TrajectoryParams(),
+                trajectory_type=trajectory_type.lower() if trajectory_type else None,
+                lookat_mode=lookat_mode.lower() if lookat_mode else None,
+                max_disparity=max_disparity,
+                max_zoom=max_zoom,
+                distance_m=distance_m,
+                num_steps=num_steps,
+                num_repeats=num_repeats,
+                duration_scale=duration_scale,
+            )
             variants_enabled = trajectory_variants and trajectory_variants_count > 1
             for variant_index, (params, suffix) in enumerate(
                 _iter_trajectory_variants(
                     base_params, enabled=variants_enabled, count=trajectory_variants_count
                 )
             ):
-                output_video_path = output_path / f"{output_prefix}{image_path.stem}{suffix}.mp4"
+                output_video_path = output_path / f"{output_prefix}{image_path.stem}{suffix}.{video_ext}"
+                output_video_path = _resolve_output_path(output_video_path, overwrite=overwrite)
                 if variants_enabled:
                     LOGGER.info("Rendering trajectory variant %d to %s", variant_index, output_video_path)
                 else:
                     LOGGER.info("Rendering trajectory to %s", output_video_path)
                 render_gaussians(
-                    gaussians,
-                    metadata,
-                    output_video_path,
+                    gaussians=gaussians,
+                    metadata=metadata,
+                    output_path=output_video_path,
                     params=params,
                     fps=fps,
-                    duration_scale=duration_scale,
+                    codec=codec,
+                    bitrate=bitrate,
+                    macro_block_size=macro_block_size,
+                    render_depth=render_depth,
+                    low_pass_filter_eps=low_pass_filter_eps,
+                    cuda_device=cuda_device,
                     progress=progress,
                 )
 
