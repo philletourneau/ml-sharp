@@ -18,6 +18,11 @@ dependencies = [
   "torchvision",
 ]
 
+[project.optional-dependencies]
+mesh = [
+  "open3d",
+]
+
 [project.scripts]
 sharp = "sharp.cli:main_cli"
 sharp-gui = "sharp.gui:main"

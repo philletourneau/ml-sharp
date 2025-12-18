@@ -71,6 +71,30 @@ sharp render -i /path/to/output/gaussians -o /path/to/output/renderings --trajec
 The `--trajectory-variants` option renders 5 different camera motions (varying trajectory type and motion magnitude) and
 writes outputs with `_v00`..`_v04` suffixes.
 
+### Meshing and USDZ export (experimental)
+
+You can extract a **colored triangle mesh** from a Gaussians `.ply` using multi-view TSDF fusion, then export it to a
+RealityKit-friendly `.usdz`.
+
+Meshing requires the optional `open3d` dependency:
+
+```
+pip install .[mesh]
+```
+
+Commands:
+
+```
+# Gaussians -> mesh (PLY with vertex colors)
+sharp mesh -i /path/to/gaussians.ply -o /path/to/mesh.ply
+
+# Mesh -> USDZ (vertex colors via UsdPreviewSurface + primvar reader)
+sharp usdz -i /path/to/mesh.ply -o /path/to/scene.usdz
+
+# Or directly: Gaussians -> mesh -> USDZ (optionally write intermediate mesh)
+sharp usdz -i /path/to/gaussians.ply -o /path/to/scene.usdz --mesh-output /path/to/mesh.ply
+```
+
 ## Evaluation
 
 Please refer to the paper for both quantitative and qualitative evaluations.
