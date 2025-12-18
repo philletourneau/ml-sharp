@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import sys
 import time
 import random
@@ -46,6 +47,8 @@ def _iter_with_progress(iterable, *, total: int, desc: str, enabled: bool):
         return
 
     try:
+        if os.environ.get("SHARP_PROGRESS_STYLE", "").lower() in {"text", "plain"}:
+            raise RuntimeError("tqdm disabled via SHARP_PROGRESS_STYLE")
         from tqdm.auto import tqdm  # type: ignore[import-not-found]
 
         yield from tqdm(
@@ -116,7 +119,20 @@ def _iter_with_progress(iterable, *, total: int, desc: str, enabled: bool):
     "--trajectory-variants/--no-trajectory-variants",
     default=False,
     show_default=True,
-    help="Render 5 variations of the trajectory (writes 5 output videos).",
+    help="Render multiple variations of the trajectory (writes multiple output videos).",
+)
+@click.option(
+    "--trajectory-variants-count",
+    type=click.IntRange(1, 5),
+    default=5,
+    show_default=True,
+    help="Number of trajectory variations to render (only used with --trajectory-variants).",
+)
+@click.option(
+    "--output-prefix",
+    type=str,
+    default="",
+    help="Prefix for output filenames (e.g. 'previz_').",
 )
 @click.option(
     "--progress/--no-progress",
@@ -131,6 +147,8 @@ def render_cli(
     fps: float,
     duration_scale: float,
     trajectory_variants: bool,
+    trajectory_variants_count: int,
+    output_prefix: str,
     progress: bool,
     verbose: bool,
 ):
@@ -150,6 +168,7 @@ def render_cli(
     output_path.mkdir(exist_ok=True, parents=True)
 
     base_params = camera.TrajectoryParams()
+    variants_enabled = trajectory_variants and trajectory_variants_count > 1
 
     if input_path.suffix == ".ply":
         scene_paths = [input_path]
@@ -163,10 +182,12 @@ def render_cli(
         LOGGER.info("Rendering %s", scene_path)
         gaussians, metadata = load_ply(scene_path)
         for variant_index, (params, suffix) in enumerate(
-            _iter_trajectory_variants(base_params, enabled=trajectory_variants, count=5)
+            _iter_trajectory_variants(
+                base_params, enabled=variants_enabled, count=trajectory_variants_count
+            )
         ):
-            output_video = output_path / f"{scene_path.stem}{suffix}.mp4"
-            if trajectory_variants:
+            output_video = output_path / f"{output_prefix}{scene_path.stem}{suffix}.mp4"
+            if variants_enabled:
                 LOGGER.info("Trajectory variant %d -> %s", variant_index, output_video)
             render_gaussians(
                 gaussians=gaussians,

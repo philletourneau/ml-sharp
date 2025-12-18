@@ -43,6 +43,11 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+.venv-build-gui
+dist
+build
+packaging/windows/assets
+!packaging/windows/sharp-gui.spec
 nosetests.xml
 coverage.xml
 *.cover
@@ -124,6 +129,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-win
 env/
 venv/
 ENV/

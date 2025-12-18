@@ -13,12 +13,14 @@ dependencies = [
   "scipy",
   "timm",
   "tqdm",
+  "truststore; platform_system == 'Windows'",
   "torch",
   "torchvision",
 ]
 
 [project.scripts]
 sharp = "sharp.cli:main_cli"
+sharp-gui = "sharp.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/apple/ml-sharp"

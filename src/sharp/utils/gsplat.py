@@ -68,6 +68,31 @@ def _get_cached_gsplat_cuda_extension_path() -> Path | None:
     return None
 
 
+def _get_packaged_gsplat_cuda_extension_path() -> Path | None:
+    """Return the path to a packaged gsplat CUDA extension, if present.
+
+    This supports self-contained Windows builds (e.g. PyInstaller) where the CUDA
+    extension is bundled alongside the application.
+    """
+    # PyInstaller onefile extracts to sys._MEIPASS.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = Path(meipass) / "gsplat_cuda.pyd"
+        if candidate.is_file():
+            return candidate
+
+    # Common layout for onedir builds.
+    exe_dir = Path(sys.executable).resolve().parent
+    for candidate in [
+        exe_dir / "gsplat_cuda.pyd",
+        exe_dir / "_internal" / "gsplat_cuda.pyd",
+    ]:
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
 def _ensure_gsplat_csrc_available() -> bool:
     """Ensure `gsplat.csrc` can be imported.
 
@@ -82,7 +107,13 @@ def _ensure_gsplat_csrc_available() -> bool:
     except Exception:
         pass
 
-    ext_path = _get_cached_gsplat_cuda_extension_path()
+    ext_path = (
+        _get_packaged_gsplat_cuda_extension_path()
+        or _get_cached_gsplat_cuda_extension_path()
+        or Path(os.environ["SHARP_GSPLAT_EXT_PATH"])
+        if os.environ.get("SHARP_GSPLAT_EXT_PATH")
+        else None
+    )
     if ext_path is None:
         return False
 
@@ -150,11 +181,12 @@ def is_gsplat_cuda_toolkit_available() -> bool:
 
 def is_gsplat_cuda_extension_available() -> bool:
     """Return True if gsplat can run on CUDA (prebuilt extension or nvcc for JIT)."""
-    return (
-        _is_prebuilt_gsplat_cuda_extension_available()
-        or _get_cached_gsplat_cuda_extension_path() is not None
-        or is_gsplat_cuda_toolkit_available()
-    )
+    if _is_prebuilt_gsplat_cuda_extension_available():
+        return True
+    # Side-effecting check that also verifies the extension can be loaded.
+    if _ensure_gsplat_csrc_available():
+        return True
+    return is_gsplat_cuda_toolkit_available()
 
 
 def require_gsplat_cuda_extension() -> None:
@@ -162,7 +194,15 @@ def require_gsplat_cuda_extension() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("Rendering requires CUDA, but torch.cuda is not available.")
 
-    if _ensure_gsplat_csrc_available() or is_gsplat_cuda_extension_available():
+    if _is_prebuilt_gsplat_cuda_extension_available():
+        return
+
+    # Ensure the extension is actually importable before proceeding; otherwise
+    # gsplat will fall back to JIT compilation (which requires MSVC on Windows).
+    if _ensure_gsplat_csrc_available():
+        return
+
+    if is_gsplat_cuda_toolkit_available():
         return
 
     raise RuntimeError(

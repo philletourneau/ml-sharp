@@ -21,6 +21,7 @@ from sharp.models import (
     create_predictor,
 )
 from sharp.utils import camera, io
+from sharp.utils import net as net_utils
 from sharp.utils import logging as logging_utils
 from sharp.utils.gaussians import (
     Gaussians3D,
@@ -133,6 +134,19 @@ def _iter_trajectory_variants(
     help="Render 5 variations of the trajectory (writes 5 output videos; only used with --render).",
 )
 @click.option(
+    "--trajectory-variants-count",
+    type=click.IntRange(1, 5),
+    default=5,
+    show_default=True,
+    help="Number of trajectory variations to render (only used with --render).",
+)
+@click.option(
+    "--output-prefix",
+    type=str,
+    default="",
+    help="Prefix for output filenames (e.g. 'previz_'; only used with --render).",
+)
+@click.option(
     "--progress/--no-progress",
     default=True,
     show_default=True,
@@ -153,6 +167,8 @@ def predict_cli(
     fps: float,
     duration_scale: float,
     trajectory_variants: bool,
+    trajectory_variants_count: int,
+    output_prefix: str,
     progress: bool,
     device: str,
     verbose: bool,
@@ -202,7 +218,15 @@ def predict_cli(
     # Load or download checkpoint
     if checkpoint_path is None:
         LOGGER.info("No checkpoint provided. Downloading default model from %s", DEFAULT_MODEL_URL)
-        state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=True)
+        net_utils.install_system_certificates()
+        try:
+            state_dict = torch.hub.load_state_dict_from_url(DEFAULT_MODEL_URL, progress=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to download the default checkpoint. If you're behind a corporate proxy/SSL "
+                "interceptor, ensure the proxy root certificate is installed in the Windows trust "
+                "store, or download the checkpoint manually and pass it via `-c/--checkpoint-path`."
+            ) from exc
     else:
         LOGGER.info("Loading checkpoint from %s", checkpoint_path)
         state_dict = torch.load(checkpoint_path, weights_only=True)
@@ -236,11 +260,14 @@ def predict_cli(
         if with_rendering:
             metadata = SceneMetaData(intrinsics[0, 0].item(), (width, height), "linearRGB")
             base_params = camera.TrajectoryParams()
+            variants_enabled = trajectory_variants and trajectory_variants_count > 1
             for variant_index, (params, suffix) in enumerate(
-                _iter_trajectory_variants(base_params, enabled=trajectory_variants, count=5)
+                _iter_trajectory_variants(
+                    base_params, enabled=variants_enabled, count=trajectory_variants_count
+                )
             ):
-                output_video_path = output_path / f"{image_path.stem}{suffix}.mp4"
-                if trajectory_variants:
+                output_video_path = output_path / f"{output_prefix}{image_path.stem}{suffix}.mp4"
+                if variants_enabled:
                     LOGGER.info("Rendering trajectory variant %d to %s", variant_index, output_video_path)
                 else:
                     LOGGER.info("Rendering trajectory to %s", output_video_path)
