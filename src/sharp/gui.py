@@ -31,6 +31,9 @@ class RunConfig:
     with_rendering: bool
 
     fps: float
+    write_frames: bool
+    frame_ext: str
+    jpeg_quality: int
     video_ext: str
     codec: str | None
     bitrate: str | None
@@ -82,13 +85,29 @@ def _build_args(cfg: RunConfig) -> list[str]:
 
     rendering_enabled = cfg.mode == "render" or (cfg.mode == "predict" and cfg.with_rendering)
     if rendering_enabled:
+        args += ["--fps", str(cfg.fps)]
+
+        args += ["--frames" if cfg.write_frames else "--no-frames"]
+        if cfg.write_frames:
+            args += [
+                "--frame-ext",
+                cfg.frame_ext,
+                "--jpeg-quality",
+                str(cfg.jpeg_quality),
+            ]
+        else:
+            args += [
+                "--video-ext",
+                cfg.video_ext,
+                "--macro-block-size",
+                str(cfg.macro_block_size),
+            ]
+            if cfg.codec:
+                args += ["--codec", cfg.codec]
+            if cfg.bitrate:
+                args += ["--bitrate", cfg.bitrate]
+
         args += [
-            "--fps",
-            str(cfg.fps),
-            "--video-ext",
-            cfg.video_ext,
-            "--macro-block-size",
-            str(cfg.macro_block_size),
             "--duration-scale",
             str(cfg.duration_scale),
             "--low-pass-filter-eps",
@@ -98,11 +117,6 @@ def _build_args(cfg: RunConfig) -> list[str]:
             "--overwrite" if cfg.overwrite else "--no-overwrite",
             "--depth" if cfg.render_depth else "--no-depth",
         ]
-
-        if cfg.codec:
-            args += ["--codec", cfg.codec]
-        if cfg.bitrate:
-            args += ["--bitrate", cfg.bitrate]
         if cfg.trajectory_type:
             args += ["--trajectory-type", cfg.trajectory_type]
         if cfg.lookat_mode:
@@ -303,6 +317,9 @@ def main() -> None:
             device=device_var.get().strip() or "default",
             with_rendering=(with_rendering or previz) if mode == "predict" else False,
             fps=fps,
+            write_frames=bool(write_frames_var.get()),
+            frame_ext=(frame_ext_var.get().strip() or "png"),
+            jpeg_quality=parse_int(jpeg_quality_var.get(), default=92),
             video_ext=video_ext_var.get().strip() or "mp4",
             codec=(codec_var.get().strip() or None),
             bitrate=(bitrate_var.get().strip() or None),
@@ -429,12 +446,11 @@ def main() -> None:
         checkpoint_browse_btn.configure(state=checkpoint_state)
 
         render_state = "normal" if is_render else "disabled"
-        for w in (
+        common_render_widgets = (
             fps_entry,
-            video_ext_combo,
-            codec_entry,
-            bitrate_entry,
-            macro_block_entry,
+            write_frames_chk,
+            frame_ext_combo,
+            jpeg_quality_entry,
             render_depth_chk,
             low_pass_entry,
             cuda_device_entry,
@@ -448,8 +464,29 @@ def main() -> None:
             num_repeats_entry,
             variants_enabled_chk,
             variants_count_combo,
-        ):
+        )
+        video_only_widgets = (
+            video_ext_combo,
+            codec_entry,
+            bitrate_entry,
+            macro_block_entry,
+        )
+
+        for w in (*common_render_widgets, *video_only_widgets):
             w.configure(state=render_state)
+
+        if render_state == "normal":
+            frames_enabled = bool(write_frames_var.get())
+
+            for w in video_only_widgets:
+                w.configure(state=("disabled" if frames_enabled else "normal"))
+
+            frame_state = "normal" if frames_enabled else "disabled"
+            frame_ext_combo.configure(state=frame_state)
+            if frames_enabled and frame_ext_var.get().strip().lower() == "jpg":
+                jpeg_quality_entry.configure(state="normal")
+            else:
+                jpeg_quality_entry.configure(state="disabled")
 
         previz_btn.configure(state=("normal" if is_render and not is_running.get() else "disabled"))
 
@@ -472,6 +509,9 @@ def main() -> None:
     disable_truststore_var = tk.IntVar(value=0)
 
     fps_var = tk.StringVar(value="60")
+    write_frames_var = tk.IntVar(value=0)
+    frame_ext_var = tk.StringVar(value="png")
+    jpeg_quality_var = tk.StringVar(value="92")
     video_ext_var = tk.StringVar(value="mp4")
     codec_var = tk.StringVar(value="")
     bitrate_var = tk.StringVar(value="")
@@ -668,6 +708,22 @@ def main() -> None:
     video_ext_combo.grid(row=r, column=3, sticky="w")
 
     r += 1
+    write_frames_chk = ttk.Checkbutton(
+        tab_render, text="Output frames (image sequence)", variable=write_frames_var
+    )
+    write_frames_chk.grid(row=r, column=0, columnspan=2, sticky="w", pady=(10, 0))
+    ttk.Label(tab_render, text="Frame ext").grid(row=r, column=2, sticky="w", pady=(10, 0))
+    frame_ext_combo = ttk.Combobox(
+        tab_render, textvariable=frame_ext_var, values=("png", "jpg"), state="readonly", width=8
+    )
+    frame_ext_combo.grid(row=r, column=3, sticky="w", pady=(10, 0))
+
+    r += 1
+    ttk.Label(tab_render, text="JPEG quality").grid(row=r, column=2, sticky="w", pady=(10, 0))
+    jpeg_quality_entry = ttk.Entry(tab_render, textvariable=jpeg_quality_var, width=10)
+    jpeg_quality_entry.grid(row=r, column=3, sticky="w", pady=(10, 0))
+
+    r += 1
     ttk.Label(tab_render, text="Codec (optional)").grid(row=r, column=0, sticky="w", pady=(10, 0))
     codec_entry = ttk.Entry(tab_render, textvariable=codec_var, width=16)
     codec_entry.grid(row=r, column=1, sticky="w", pady=(10, 0))
@@ -680,7 +736,7 @@ def main() -> None:
     macro_block_entry = ttk.Entry(tab_render, textvariable=macro_block_size_var, width=10)
     macro_block_entry.grid(row=r, column=1, sticky="w", pady=(10, 0))
     render_depth_chk = ttk.Checkbutton(
-        tab_render, text="Render depth video", variable=render_depth_var
+        tab_render, text="Render depth output", variable=render_depth_var
     )
     render_depth_chk.grid(row=r, column=2, columnspan=2, sticky="w", pady=(10, 0))
 
@@ -737,10 +793,11 @@ def main() -> None:
 
     use_default_checkpoint_var.trace_add("write", update_checkpoint_ui)
     workflow_var.trace_add("write", update_mode_ui)
+    write_frames_var.trace_add("write", update_mode_ui)
+    frame_ext_var.trace_add("write", update_mode_ui)
     is_running.trace_add("write", update_mode_ui)
     update_mode_ui()
 
     drain_output()
     log_line("Tip: Use 'Copy Command' to run the same settings in a terminal.")
     root.mainloop()
-

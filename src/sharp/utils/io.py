@@ -231,3 +231,66 @@ class VideoWriter(OutputWriter):
         self.image_writer.close()
         if self.depth_writer is not None:
             self.depth_writer.close()
+
+
+class FrameSequenceWriter(OutputWriter):
+    """Output writer for image sequence output."""
+
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        render_depth: bool = True,
+        frame_ext: str = "png",
+        jpeg_quality: int = 92,
+        clear_existing: bool = False,
+    ) -> None:
+        frame_ext = frame_ext.lower().lstrip(".")
+        if frame_ext == "jpeg":
+            frame_ext = "jpg"
+        if frame_ext not in {"png", "jpg"}:
+            raise ValueError(f"Unsupported frame extension: {frame_ext}.")
+        if not (1 <= int(jpeg_quality) <= 100):
+            raise ValueError("jpeg_quality must be between 1 and 100.")
+
+        self.output_dir = output_dir
+        self.frame_ext = frame_ext
+        self.jpeg_quality = int(jpeg_quality)
+        self.render_depth = render_depth
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if clear_existing:
+            for path in output_dir.iterdir():
+                if not path.is_file():
+                    continue
+                stem = path.stem
+                if stem.startswith("color_") and stem[len("color_") :].isdigit():
+                    path.unlink(missing_ok=True)
+                elif stem.startswith("depth_") and stem[len("depth_") :].isdigit():
+                    path.unlink(missing_ok=True)
+
+        self._frame_index = 0
+        self.max_depth_estimate: float | None = None
+
+    def add_frame(self, image: torch.Tensor, depth: torch.Tensor) -> None:
+        image_path = self.output_dir / f"color_{self._frame_index:06d}.{self.frame_ext}"
+        image_np = image.detach().cpu().numpy()
+        save_image(image_np, image_path, jpeg_quality=self.jpeg_quality)
+
+        if self.render_depth:
+            if self.max_depth_estimate is None:
+                self.max_depth_estimate = depth.max().item()
+
+            colored_depth_pt = colorize_depth(
+                depth,
+                min(self.max_depth_estimate, METRIC_DEPTH_MAX_CLAMP_METER),  # type: ignore[call-overload]
+            )
+            colored_depth_np = colored_depth_pt.squeeze(0).permute(1, 2, 0).cpu().numpy()
+            depth_path = self.output_dir / f"depth_{self._frame_index:06d}.{self.frame_ext}"
+            save_image(colored_depth_np, depth_path, jpeg_quality=self.jpeg_quality)
+
+        self._frame_index += 1
+
+    def close(self) -> None:
+        return

@@ -30,7 +30,7 @@ from sharp.utils.gaussians import (
     unproject_gaussians,
 )
 
-from .render import _make_trajectory_params, _resolve_output_path, render_gaussians
+from .render import _make_trajectory_params, _resolve_output_dir, _resolve_output_path, render_gaussians
 
 LOGGER = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def _iter_trajectory_variants(
     "-o",
     "--output-path",
     type=click.Path(path_type=Path, file_okay=False),
-    help="Path to save the predicted Gaussians and renderings.",
+    help="Path to save the predicted Gaussians and renderings (videos or frame sequences).",
     required=True,
 )
 @click.option(
@@ -128,6 +128,27 @@ def _iter_trajectory_variants(
     help="Video container extension (only used with --render).",
 )
 @click.option(
+    "--frames/--no-frames",
+    "write_frames",
+    default=False,
+    show_default=True,
+    help="Write an image sequence (color_000000.png) instead of a video file (only used with --render).",
+)
+@click.option(
+    "--frame-ext",
+    type=click.Choice(["png", "jpg"], case_sensitive=False),
+    default="png",
+    show_default=True,
+    help="Image extension for frame output (only used with --render and --frames).",
+)
+@click.option(
+    "--jpeg-quality",
+    type=click.IntRange(1, 100),
+    default=92,
+    show_default=True,
+    help="JPEG quality for frame output (only used with --render, --frames, and --frame-ext jpg).",
+)
+@click.option(
     "--codec",
     type=str,
     default=None,
@@ -151,7 +172,7 @@ def _iter_trajectory_variants(
     "render_depth",
     default=True,
     show_default=True,
-    help="Whether to render a depth video alongside the color video (only used with --render).",
+    help="Whether to render a depth output alongside the color output (only used with --render).",
 )
 @click.option(
     "--duration-scale",
@@ -261,6 +282,9 @@ def predict_cli(
     with_rendering: bool,
     fps: float,
     video_ext: str,
+    write_frames: bool,
+    frame_ext: str,
+    jpeg_quality: int,
     codec: str | None,
     bitrate: str | None,
     macro_block_size: int,
@@ -386,8 +410,12 @@ def predict_cli(
                     base_params, enabled=variants_enabled, count=trajectory_variants_count
                 )
             ):
-                output_video_path = output_path / f"{output_prefix}{image_path.stem}{suffix}.{video_ext}"
-                output_video_path = _resolve_output_path(output_video_path, overwrite=overwrite)
+                if write_frames:
+                    output_video_path = output_path / f"{output_prefix}{image_path.stem}{suffix}_frames"
+                    output_video_path = _resolve_output_dir(output_video_path, overwrite=overwrite)
+                else:
+                    output_video_path = output_path / f"{output_prefix}{image_path.stem}{suffix}.{video_ext}"
+                    output_video_path = _resolve_output_path(output_video_path, overwrite=overwrite)
                 if variants_enabled:
                     LOGGER.info("Rendering trajectory variant %d to %s", variant_index, output_video_path)
                 else:
@@ -405,6 +433,10 @@ def predict_cli(
                     low_pass_filter_eps=low_pass_filter_eps,
                     cuda_device=cuda_device,
                     progress=progress,
+                    write_frames=write_frames,
+                    frame_ext=frame_ext,
+                    jpeg_quality=jpeg_quality,
+                    overwrite=overwrite,
                 )
 
 

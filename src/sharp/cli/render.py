@@ -100,6 +100,19 @@ def _resolve_output_path(path: Path, *, overwrite: bool) -> Path:
     raise RuntimeError(f"Could not find an available output filename for {path}.")
 
 
+def _resolve_output_dir(path: Path, *, overwrite: bool) -> Path:
+    """Resolve output directory depending on overwrite policy."""
+    if overwrite or not path.exists():
+        return path
+
+    name = path.name
+    for i in range(1, 10_000):
+        candidate = path.with_name(f"{name}_{i:03d}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not find an available output directory name for {path}.")
+
+
 def _make_trajectory_params(
     *,
     base: camera.TrajectoryParams,
@@ -148,7 +161,7 @@ def _make_trajectory_params(
     "-o",
     "--output-path",
     type=click.Path(path_type=Path, file_okay=False),
-    help="Path to save the rendered videos.",
+    help="Path to save the rendered outputs (videos or frame sequences).",
     required=True,
 )
 @click.option(
@@ -164,6 +177,27 @@ def _make_trajectory_params(
     default="mp4",
     show_default=True,
     help="Video container extension.",
+)
+@click.option(
+    "--frames/--no-frames",
+    "write_frames",
+    default=False,
+    show_default=True,
+    help="Write an image sequence (color_000000.png) instead of a video file.",
+)
+@click.option(
+    "--frame-ext",
+    type=click.Choice(["png", "jpg"], case_sensitive=False),
+    default="png",
+    show_default=True,
+    help="Image extension for frame output (only used with --frames).",
+)
+@click.option(
+    "--jpeg-quality",
+    type=click.IntRange(1, 100),
+    default=92,
+    show_default=True,
+    help="JPEG quality for frame output (only used with --frames and --frame-ext jpg).",
 )
 @click.option(
     "--codec",
@@ -189,7 +223,7 @@ def _make_trajectory_params(
     "render_depth",
     default=True,
     show_default=True,
-    help="Whether to render a depth video alongside the color video.",
+    help="Whether to render a depth output alongside the color output.",
 )
 @click.option(
     "--duration-scale",
@@ -266,6 +300,9 @@ def render_cli(
     output_path: Path,
     fps: float,
     video_ext: str,
+    write_frames: bool,
+    frame_ext: str,
+    jpeg_quality: int,
     codec: str | None,
     bitrate: str | None,
     macro_block_size: int,
@@ -287,7 +324,7 @@ def render_cli(
     progress: bool,
     verbose: bool,
 ):
-    """Render trajectory videos from Gaussians (.ply)."""
+    """Render trajectory outputs from Gaussians (.ply)."""
     logging_utils.configure(logging.DEBUG if verbose else logging.INFO)
 
     if not torch.cuda.is_available():
@@ -333,15 +370,20 @@ def render_cli(
                 base_params, enabled=variants_enabled, count=trajectory_variants_count
             )
         ):
-            output_video = output_path / f"{output_prefix}{scene_path.stem}{suffix}.{video_ext}"
-            output_video = _resolve_output_path(output_video, overwrite=overwrite)
+            if write_frames:
+                output_target = output_path / f"{output_prefix}{scene_path.stem}{suffix}_frames"
+                output_target = _resolve_output_dir(output_target, overwrite=overwrite)
+            else:
+                output_target = output_path / f"{output_prefix}{scene_path.stem}{suffix}.{video_ext}"
+                output_target = _resolve_output_path(output_target, overwrite=overwrite)
+
             if variants_enabled:
-                LOGGER.info("Trajectory variant %d -> %s", variant_index, output_video)
+                LOGGER.info("Trajectory variant %d -> %s", variant_index, output_target)
             render_gaussians(
                 gaussians=gaussians,
                 metadata=metadata,
                 params=params,
-                output_path=output_video,
+                output_path=output_target,
                 fps=fps,
                 codec=codec,
                 bitrate=bitrate,
@@ -350,6 +392,10 @@ def render_cli(
                 low_pass_filter_eps=low_pass_filter_eps,
                 cuda_device=cuda_device,
                 progress=progress,
+                write_frames=write_frames,
+                frame_ext=frame_ext,
+                jpeg_quality=jpeg_quality,
+                overwrite=overwrite,
             )
 
 
@@ -366,6 +412,10 @@ def render_gaussians(
     low_pass_filter_eps: float = 0.0,
     cuda_device: int = 0,
     progress: bool = True,
+    write_frames: bool = False,
+    frame_ext: str = "png",
+    jpeg_quality: int = 92,
+    overwrite: bool = True,
 ) -> None:
     """Render a single gaussian checkpoint file."""
     (width, height) = metadata.resolution_px
@@ -406,14 +456,25 @@ def render_gaussians(
         _format_duration(total_frames / fps if fps > 0 else 0.0),
     )
     renderer = gsplat.GSplatRenderer(color_space=metadata.color_space, low_pass_filter_eps=low_pass_filter_eps)
-    video_writer = io.VideoWriter(
-        output_path,
-        fps=fps,
-        render_depth=render_depth,
-        codec=codec,
-        bitrate=bitrate,
-        macro_block_size=macro_block_size,
-    )
+
+    writer: io.OutputWriter
+    if write_frames:
+        writer = io.FrameSequenceWriter(
+            output_path,
+            render_depth=render_depth,
+            frame_ext=frame_ext,
+            jpeg_quality=jpeg_quality,
+            clear_existing=overwrite,
+        )
+    else:
+        writer = io.VideoWriter(
+            output_path,
+            fps=fps,
+            render_depth=render_depth,
+            codec=codec,
+            bitrate=bitrate,
+            macro_block_size=macro_block_size,
+        )
     gaussians_device = gaussians.to(device)
 
     for eye_position in _iter_with_progress(
@@ -429,8 +490,8 @@ def render_gaussians(
         )
         color = (rendering_output.color[0].permute(1, 2, 0) * 255.0).to(dtype=torch.uint8)
         depth = rendering_output.depth[0]
-        video_writer.add_frame(color, depth)
-    video_writer.close()
+        writer.add_frame(color, depth)
+    writer.close()
 
 
 def _iter_trajectory_variants(
