@@ -62,11 +62,22 @@ def compute_max_offset(
     min_depth, _, _ = _compute_depth_quantiles(scene_points, extrinsics)
 
     r_px = resolution_px
+    width_px, height_px = r_px
+    aspect_ratio = width_px / height_px if height_px else 1.0
+    reference_aspect = 21 / 9
+    # Reduce horizontal motion as aspect ratio narrows versus the 21:9 baseline.
+    horizontal_scale = min(1.0, aspect_ratio / reference_aspect)
     diagonal = np.sqrt((r_px[0] / f_px) ** 2 + (r_px[1] / f_px) ** 2)
     max_lateral_offset_m = params.max_disparity * diagonal * min_depth
 
     max_medial_offset_m = params.max_zoom * min_depth
-    max_offset_xyz_m = np.array([max_lateral_offset_m, max_lateral_offset_m, max_medial_offset_m])
+    max_offset_xyz_m = np.array(
+        [
+            max_lateral_offset_m * horizontal_scale,
+            max_lateral_offset_m,
+            max_medial_offset_m,
+        ]
+    )
 
     return max_offset_xyz_m
 

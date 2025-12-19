@@ -93,7 +93,7 @@ def main() -> None:
         return None if not s else float(s)
 
     def browse_input() -> None:
-        initial_dir = output_folder_var.get().strip() or "Z:/Splats/output"
+        initial_dir = output_folder_var.get().strip() or "C:/Users/phill/Dropbox/Splats/outputs"
         initialdir_arg = {"initialdir": initial_dir} if Path(initial_dir).exists() else {}
         p = filedialog.askopenfilename(
             title="Select a .ply file",
@@ -106,7 +106,7 @@ def main() -> None:
                 base_name_var.set(Path(p).stem)
 
     def browse_output_folder() -> None:
-        default_out = output_folder_var.get().strip() or "Z:/Splats/output"
+        default_out = output_folder_var.get().strip() or "C:/Users/phill/Dropbox/Splats/outputs"
         initialdir_arg = {"initialdir": default_out} if Path(default_out).exists() else {}
         p = filedialog.askdirectory(title="Select an output folder", **initialdir_arg)
         if p:
@@ -122,7 +122,7 @@ def main() -> None:
             log_line(f"Could not open output folder: {exc}")
 
     def computed_paths() -> tuple[Path, Path]:
-        out_dir = Path(output_folder_var.get().strip() or "Z:/Splats/output")
+        out_dir = Path(output_folder_var.get().strip() or "C:/Users/phill/Dropbox/Splats/outputs")
         base = base_name_var.get().strip() or "scene"
         mesh_path = out_dir / f"{base}_mesh.ply"
         usdz_path = out_dir / f"{base}.usdz"
@@ -289,7 +289,7 @@ def main() -> None:
     # UI state vars
     workflow_var = tk.StringVar(value="Gaussians (.ply) -> USDZ")
     input_path_var = tk.StringVar()
-    output_folder_var = tk.StringVar(value="Z:/Splats/output")
+    output_folder_var = tk.StringVar(value="C:/Users/phill/Dropbox/Splats/outputs")
     base_name_var = tk.StringVar(value="")
     write_mesh_var = tk.IntVar(value=1)
 

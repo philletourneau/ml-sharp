@@ -5,10 +5,15 @@ This app wraps the `@playcanvas/splat-transform` CLI and produces a single-page 
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import math
 import os
 import queue
+import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -26,19 +31,65 @@ class RunConfig:
     viewer_settings: Path | None
     unbundled: bool
     overwrite: bool
+    limit_camera: bool
+    enable_aa: bool
+    enable_msaa: bool
+    match_gsplat_camera: bool
     gpu: str | None  # "cpu" or an integer string
     iterations: int | None
     extra_args: str
 
 
-def _apply_sharp_style_viewer_constraints(output_html: Path, *, unbundled: bool) -> None:
-    """Post-process SuperSplat Viewer to restrict camera controls (SHARP-style)."""
+def _apply_viewer_customizations(
+    output_html: Path,
+    *,
+    unbundled: bool,
+    limit_camera: bool,
+    enable_aa: bool,
+    enable_msaa: bool,
+) -> None:
+    """Post-process SuperSplat Viewer output for SHARP-style defaults and quality settings."""
 
     def patch_text_file(path: Path, patcher: Callable[[str], str]) -> None:
         text = path.read_text(encoding="utf-8")
         patched = patcher(text)
         if patched != text:
             path.write_text(patched, encoding="utf-8")
+
+    def patch_viewer_html(text: str) -> str:
+        patched = text
+        aa_value = "true" if enable_aa else "false"
+        aa_pattern = r"aa:\s*(?:url\.searchParams\.has\('aa'\)|true|false)"
+        if re.search(aa_pattern, patched):
+            patched = re.sub(aa_pattern, f"aa: {aa_value}", patched, count=1)
+        else:
+            raise RuntimeError("Could not patch AA default (expected aa setting not found).")
+
+        noanim_pattern = r"noanim:\s*url\.searchParams\.has\('noanim'\)"
+        if re.search(noanim_pattern, patched):
+            patched = re.sub(
+                noanim_pattern,
+                "noanim: url.searchParams.has('noanim') || !url.searchParams.has('anim')",
+                patched,
+                count=1,
+            )
+        else:
+            raise RuntimeError("Could not patch noanim default (expected noanim setting not found).")
+
+        msaa_value = "true" if enable_msaa else "false"
+        msaa_pattern = r'antialias="(?:true|false)"'
+        if re.search(msaa_pattern, patched):
+            patched = re.sub(msaa_pattern, f'antialias="{msaa_value}"', patched, count=1)
+        else:
+            raise RuntimeError("Could not patch MSAA default (expected antialias attribute not found).")
+
+        return patched
+
+    if output_html.is_file():
+        patch_text_file(output_html, patch_viewer_html)
+
+    if not limit_camera:
+        return
 
     # Hide fly camera button in the UI (if present).
     if output_html.is_file():
@@ -147,6 +198,25 @@ _PLY_SCALAR_TYPE_SIZES: dict[str, int] = {
     "float64": 8,
 }
 
+_PLY_SCALAR_TYPE_STRUCT: dict[str, str] = {
+    "char": "b",
+    "int8": "b",
+    "uchar": "B",
+    "uint8": "B",
+    "short": "h",
+    "int16": "h",
+    "ushort": "H",
+    "uint16": "H",
+    "int": "i",
+    "int32": "i",
+    "uint": "I",
+    "uint32": "I",
+    "float": "f",
+    "float32": "f",
+    "double": "d",
+    "float64": "d",
+}
+
 
 def _parse_ply_header(path: Path) -> tuple[str, list[tuple[str, int, list[str]]], int]:
     """Parse enough of a PLY header to locate element boundaries.
@@ -218,6 +288,123 @@ def _element_fixed_record_size(prop_lines: list[str]) -> int:
             raise RuntimeError(f"Unsupported PLY scalar type: {prop_type}")
         size += _PLY_SCALAR_TYPE_SIZES[prop_type]
     return size
+
+
+def _element_single_property_type(prop_lines: list[str]) -> str | None:
+    prop_types = []
+    for line in prop_lines:
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != "property":
+            continue
+        if parts[1] == "list":
+            return None
+        prop_types.append(parts[1].lower())
+    if len(prop_types) != 1:
+        return None
+    return prop_types[0]
+
+
+def _read_ply_element_values(path: Path, element_name: str) -> list[float] | None:
+    format_line, elements, data_start = _parse_ply_header(path)
+    if not format_line.startswith("format binary_"):
+        return None
+    if "binary_little_endian" in format_line:
+        endian = "<"
+    elif "binary_big_endian" in format_line:
+        endian = ">"
+    else:
+        return None
+
+    offset = data_start
+    for name, count, props in elements:
+        record_size = _element_fixed_record_size(props)
+        if name == element_name:
+            prop_type = _element_single_property_type(props)
+            if prop_type is None:
+                raise RuntimeError(f"PLY element '{element_name}' is not a single scalar property.")
+            struct_char = _PLY_SCALAR_TYPE_STRUCT.get(prop_type)
+            if struct_char is None:
+                raise RuntimeError(f"Unsupported PLY scalar type: {prop_type}")
+            if count <= 0:
+                return []
+            byte_count = count * _PLY_SCALAR_TYPE_SIZES[prop_type]
+            with path.open("rb") as f:
+                f.seek(offset)
+                data = f.read(byte_count)
+            if len(data) != byte_count:
+                raise RuntimeError(f"Unexpected EOF while reading PLY element '{element_name}'.")
+            fmt = endian + struct_char
+            return [val[0] for val in struct.iter_unpack(fmt, data)]
+        offset += count * record_size
+    return None
+
+
+def _compute_gsplat_camera_settings(
+    path: Path,
+) -> tuple[dict[str, object], float | None, float] | None:
+    if path.suffix.lower() != ".ply":
+        return None
+
+    intrinsic = _read_ply_element_values(path, "intrinsic")
+    if not intrinsic:
+        return None
+
+    image_size = _read_ply_element_values(path, "image_size")
+    if image_size and len(image_size) >= 2:
+        height = float(image_size[1])
+    elif len(intrinsic) == 4:
+        height = float(intrinsic[3])
+    else:
+        return None
+
+    if len(intrinsic) >= 5:
+        f_px = float(intrinsic[4])
+    elif len(intrinsic) >= 2:
+        f_px = float(intrinsic[1])
+    else:
+        f_px = float(intrinsic[0])
+
+    fov = None
+    if f_px > 0 and height > 0:
+        fov = 2.0 * math.degrees(math.atan((height * 0.5) / f_px))
+
+    depth_focus = 2.0
+    disparity = _read_ply_element_values(path, "disparity")
+    if disparity and len(disparity) >= 2:
+        q90 = float(disparity[1])
+        if q90 > 1e-6:
+            depth_focus = max(depth_focus, 1.0 / q90)
+
+    camera_settings: dict[str, object] = {
+        "camera": {
+            "position": [0.0, 0.0, 0.0],
+            "target": [0.0, 0.0, float(depth_focus)],
+        }
+    }
+    if fov is not None:
+        camera_settings["camera"]["fov"] = float(fov)
+
+    return camera_settings, fov, depth_focus
+
+
+def _merge_viewer_settings(
+    base: dict[str, object], overrides: dict[str, object]
+) -> dict[str, object]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = {**existing, **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_viewer_settings(path: Path) -> dict[str, object]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError("Viewer settings JSON must be an object.")
+    return data
 
 
 def _needs_vertex_only_ply(path: Path) -> bool:
@@ -370,7 +557,7 @@ def main() -> None:
         copy_btn.configure(state=("disabled" if running else "normal"))
 
     def browse_input() -> None:
-        initial_dir = "Z:/Splats/output"
+        initial_dir = "C:/Users/phill/Dropbox/Splats/outputs"
         initialdir_arg = {"initialdir": initial_dir} if Path(initial_dir).exists() else {}
         p = filedialog.askopenfilename(
             title="Select a .ply file",
@@ -380,7 +567,7 @@ def main() -> None:
         if p:
             input_var.set(p)
             if not output_var.get().strip():
-                out_dir = Path(output_folder_var.get().strip() or "Z:/Splats/output")
+                out_dir = Path(output_folder_var.get().strip() or "C:/Users/phill/Dropbox/Splats/outputs")
                 output_var.set(str(out_dir / (Path(p).stem + ".html")))
 
     def browse_output_html() -> None:
@@ -436,6 +623,10 @@ def main() -> None:
             viewer_settings=settings_path,
             unbundled=bool(unbundled_var.get()),
             overwrite=bool(overwrite_var.get()),
+            limit_camera=bool(limit_camera_var.get()),
+            enable_aa=bool(enable_aa_var.get()),
+            enable_msaa=bool(enable_msaa_var.get()),
+            match_gsplat_camera=bool(match_gsplat_camera_var.get()),
             gpu=gpu_value,
             iterations=iterations,
             extra_args=extra_args_var.get(),
@@ -480,24 +671,49 @@ def main() -> None:
         try:
             effective_cfg = cfg
             temp_dir: tempfile.TemporaryDirectory[str] | None = None
-            if _needs_vertex_only_ply(cfg.input_path):
+            if cfg.match_gsplat_camera:
+                try:
+                    camera_result = _compute_gsplat_camera_settings(cfg.input_path)
+                except Exception as exc:
+                    log_line(f"Could not derive gsplat camera settings: {exc}")
+                else:
+                    if camera_result is None:
+                        log_line("Could not derive gsplat camera settings; using defaults.")
+                    else:
+                        camera_settings, fov, depth_focus = camera_result
+                        if fov is None:
+                            fov_label = "default fov"
+                        else:
+                            fov_label = f"fov={fov:.2f}deg"
+                        log_line(
+                            "Using gsplat camera settings "
+                            f"({fov_label}, focus={depth_focus:.2f}m)."
+                        )
+                        merged_settings = camera_settings
+                        if cfg.viewer_settings is not None:
+                            existing = _load_viewer_settings(cfg.viewer_settings)
+                            merged_settings = _merge_viewer_settings(existing, camera_settings)
+                        if temp_dir is None:
+                            temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
+                        settings_path = Path(temp_dir.name) / "viewer.settings.json"
+                        settings_path.write_text(
+                            json.dumps(merged_settings, indent=2),
+                            encoding="utf-8",
+                        )
+                        effective_cfg = dataclasses.replace(
+                            effective_cfg, viewer_settings=settings_path
+                        )
+
+            if _needs_vertex_only_ply(effective_cfg.input_path):
                 log_line(
                     "Input PLY contains extra metadata elements; generating a vertex-only copy for "
                     "splat-transform..."
                 )
-                temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
-                stripped = Path(temp_dir.name) / f"{cfg.input_path.stem}.vertex-only.ply"
-                _write_vertex_only_ply(cfg.input_path, stripped)
-                effective_cfg = RunConfig(
-                    input_path=stripped,
-                    output_html=cfg.output_html,
-                    viewer_settings=cfg.viewer_settings,
-                    unbundled=cfg.unbundled,
-                    overwrite=cfg.overwrite,
-                    gpu=cfg.gpu,
-                    iterations=cfg.iterations,
-                    extra_args=cfg.extra_args,
-                )
+                if temp_dir is None:
+                    temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
+                stripped = Path(temp_dir.name) / f"{effective_cfg.input_path.stem}.vertex-only.ply"
+                _write_vertex_only_ply(effective_cfg.input_path, stripped)
+                effective_cfg = dataclasses.replace(effective_cfg, input_path=stripped)
 
             cmd, cwd = _build_command(effective_cfg)
             log_line("Running: " + " ".join(cmd))
@@ -519,10 +735,19 @@ def main() -> None:
             if rc != 0:
                 raise RuntimeError(f"splat-transform exited with code {rc}")
 
-            if bool(limit_camera_var.get()):
-                log_line("Applying SHARP-style camera limits to the generated viewer...")
-                _apply_sharp_style_viewer_constraints(
-                    effective_cfg.output_html, unbundled=effective_cfg.unbundled
+            if effective_cfg.limit_camera or effective_cfg.enable_aa or effective_cfg.enable_msaa:
+                patch_bits = []
+                patch_bits.append(f"AA={'on' if effective_cfg.enable_aa else 'off'}")
+                patch_bits.append(f"MSAA={'on' if effective_cfg.enable_msaa else 'off'}")
+                if effective_cfg.limit_camera:
+                    patch_bits.append("camera limits")
+                log_line("Applying viewer defaults (" + ", ".join(patch_bits) + ")...")
+                _apply_viewer_customizations(
+                    effective_cfg.output_html,
+                    unbundled=effective_cfg.unbundled,
+                    limit_camera=effective_cfg.limit_camera,
+                    enable_aa=effective_cfg.enable_aa,
+                    enable_msaa=effective_cfg.enable_msaa,
                 )
 
             log_line(f"Done in {time.time() - started:.1f}s")
@@ -551,14 +776,17 @@ def main() -> None:
 
     # Vars
     input_var = tk.StringVar(value="")
-    output_folder_var = tk.StringVar(value="Z:/Splats/output")
+    output_folder_var = tk.StringVar(value="C:/Users/phill/Dropbox/Splats/outputs")
     output_var = tk.StringVar(value="")
     settings_var = tk.StringVar(value="")
     unbundled_var = tk.IntVar(value=0)
     overwrite_var = tk.IntVar(value=1)
     limit_camera_var = tk.IntVar(value=1)
+    match_gsplat_camera_var = tk.IntVar(value=1)
+    enable_aa_var = tk.IntVar(value=1)
+    enable_msaa_var = tk.IntVar(value=1)
     gpu_var = tk.StringVar(value="default")
-    iterations_var = tk.StringVar(value="")
+    iterations_var = tk.StringVar(value="18")
     extra_args_var = tk.StringVar(value="")
 
     # Layout
@@ -598,10 +826,21 @@ def main() -> None:
     ttk.Checkbutton(opts, text="Limit camera controls (SHARP-style)", variable=limit_camera_var).pack(
         side="left", padx=(12, 0)
     )
-    ttk.Label(opts, text="GPU").pack(side="left", padx=(12, 0))
-    ttk.Entry(opts, textvariable=gpu_var, width=10).pack(side="left")
-    ttk.Label(opts, text="Iterations").pack(side="left", padx=(12, 0))
-    ttk.Entry(opts, textvariable=iterations_var, width=8).pack(side="left")
+    ttk.Checkbutton(opts, text="Match gsplat camera", variable=match_gsplat_camera_var).pack(
+        side="left", padx=(12, 0)
+    )
+
+    row += 1
+    quality_opts = ttk.Frame(frm)
+    quality_opts.grid(row=row, column=0, columnspan=3, sticky="we", pady=(6, 0))
+    ttk.Checkbutton(quality_opts, text="Enable splat AA", variable=enable_aa_var).pack(side="left")
+    ttk.Checkbutton(quality_opts, text="Enable MSAA", variable=enable_msaa_var).pack(
+        side="left", padx=(12, 0)
+    )
+    ttk.Label(quality_opts, text="GPU").pack(side="left", padx=(12, 0))
+    ttk.Entry(quality_opts, textvariable=gpu_var, width=10).pack(side="left")
+    ttk.Label(quality_opts, text="Iterations").pack(side="left", padx=(12, 0))
+    ttk.Entry(quality_opts, textvariable=iterations_var, width=8).pack(side="left")
 
     row += 1
     ttk.Label(frm, text="Extra args").grid(row=row, column=0, sticky="w", pady=(10, 0))

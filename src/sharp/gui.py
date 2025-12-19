@@ -244,7 +244,7 @@ def main() -> None:
             input_var.set(p)
 
     def browse_output_folder() -> None:
-        default_out = output_var.get().strip() or "Z:/Splats/output"
+        default_out = output_var.get().strip() or "C:/Users/phill/Dropbox/Splats/outputs"
         initialdir_arg = {"initialdir": default_out} if Path(default_out).exists() else {}
         p = filedialog.askdirectory(title="Select an output folder", **initialdir_arg)
         if p:
@@ -499,7 +499,7 @@ def main() -> None:
 
     workflow_var = tk.StringVar(value="Predict + Render (Video)")
     input_var = tk.StringVar()
-    output_var = tk.StringVar(value="Z:/Splats/output")
+    output_var = tk.StringVar(value="C:/Users/phill/Dropbox/Splats/outputs")
     output_prefix_var = tk.StringVar(value="")
     overwrite_var = tk.IntVar(value=1)
 
@@ -546,14 +546,12 @@ def main() -> None:
     tab_traj = ttk.Frame(notebook, padding=10)
     tab_render = ttk.Frame(notebook, padding=10)
     tab_adv = ttk.Frame(notebook, padding=10)
-    tab_log = ttk.Frame(notebook, padding=10)
 
     notebook.add(tab_io, text="Input/Output")
     notebook.add(tab_model, text="Model")
     notebook.add(tab_traj, text="Trajectory")
     notebook.add(tab_render, text="Render/Video")
     notebook.add(tab_adv, text="Advanced")
-    notebook.add(tab_log, text="Log")
 
     # Input/Output tab
     r = 0
@@ -768,18 +766,20 @@ def main() -> None:
     )
     tab_adv.columnconfigure(1, weight=1)
 
-    # Log tab
-    log_text = tk.Text(tab_log, height=26, wrap="word", state="disabled")
-    log_text.grid(row=0, column=0, sticky="nsew")
-    scrollbar = ttk.Scrollbar(tab_log, command=log_text.yview)
-    scrollbar.grid(row=0, column=1, sticky="ns")
+    # Log (always visible under tabs)
+    log_frame = ttk.LabelFrame(outer, text="Log")
+    log_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+    log_text = tk.Text(log_frame, height=10, wrap="word", state="disabled")
+    log_text.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+    scrollbar = ttk.Scrollbar(log_frame, command=log_text.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
     log_text.configure(yscrollcommand=scrollbar.set)
-    tab_log.rowconfigure(0, weight=1)
-    tab_log.columnconfigure(0, weight=1)
+    log_frame.rowconfigure(0, weight=1)
+    log_frame.columnconfigure(0, weight=1)
 
     # Bottom buttons
     buttons = ttk.Frame(outer, padding=(0, 10, 0, 0))
-    buttons.grid(row=1, column=0, sticky="we")
+    buttons.grid(row=2, column=0, sticky="we")
     run_btn = ttk.Button(buttons, text="Run", command=on_run)
     run_btn.pack(side="left")
     previz_btn = ttk.Button(buttons, text="Previz (fast)", command=on_previz)
