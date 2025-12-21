@@ -24,12 +24,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-
-@dataclass(frozen=True)
 MOTION_PRESET_FPS = 6
 MOTION_AMPLITUDE_SCALE = 0.65
 
 
+@dataclass(frozen=True)
 class RunConfig:
     input_path: Path
     output_html: Path
