@@ -10,6 +10,7 @@ import json
 import math
 import os
 import queue
+import random
 import re
 import shlex
 import shutil
@@ -31,7 +32,6 @@ class RunConfig:
     viewer_settings: Path | None
     unbundled: bool
     overwrite: bool
-    limit_camera: bool
     enable_aa: bool
     enable_msaa: bool
     match_gsplat_camera: bool
@@ -44,17 +44,20 @@ def _apply_viewer_customizations(
     output_html: Path,
     *,
     unbundled: bool,
-    limit_camera: bool,
     enable_aa: bool,
     enable_msaa: bool,
+    motion_presets: dict[str, object] | None,
 ) -> None:
-    """Post-process SuperSplat Viewer output for SHARP-style defaults and quality settings."""
+    """Post-process SuperSplat Viewer output for SHARP-style defaults and motion controls."""
 
     def patch_text_file(path: Path, patcher: Callable[[str], str]) -> None:
         text = path.read_text(encoding="utf-8")
         patched = patcher(text)
         if patched != text:
             path.write_text(patched, encoding="utf-8")
+
+    presets_payload = motion_presets or {"version": 1, "fps": 60, "presets": []}
+    presets_json = json.dumps(presets_payload, separators=(",", ":"))
 
     def patch_viewer_html(text: str) -> str:
         patched = text
@@ -83,30 +86,98 @@ def _apply_viewer_customizations(
         else:
             raise RuntimeError("Could not patch MSAA default (expected antialias attribute not found).")
 
+        if "sharp-motion-style" not in patched:
+            style_block = (
+                "<style id=\"sharp-motion-style\">\n"
+                "#settingsPanel .settingsLabel {\n"
+                "  cursor: default;\n"
+                "  color: #E0DCDD;\n"
+                "}\n"
+                "#settingsPanel select,\n"
+                "#settingsPanel input[type=range] {\n"
+                "  flex-grow: 1;\n"
+                "  min-width: 0;\n"
+                "  padding: 6px 8px;\n"
+                "  border: 0;\n"
+                "  color: #E0DCDD;\n"
+                "  background-color: #141414;\n"
+                "}\n"
+                "#settingsPanel input[type=range] {\n"
+                "  padding: 0;\n"
+                "}\n"
+                "#settingsPanel #motionSpeedValue {\n"
+                "  padding: 8px 6px;\n"
+                "  min-width: 48px;\n"
+                "  text-align: right;\n"
+                "  color: #E0DCDD;\n"
+                "}\n"
+                "#settingsPanel #cameraDebugInfo {\n"
+                "  width: 100%;\n"
+                "  white-space: pre;\n"
+                "  font-family: Consolas, \"Courier New\", monospace;\n"
+                "  font-size: 11px;\n"
+                "  line-height: 1.3;\n"
+                "  color: #CFCFCF;\n"
+                "  background-color: #1f1f1f;\n"
+                "  border-radius: 4px;\n"
+                "  padding: 6px;\n"
+                "}\n"
+                "</style>\n"
+            )
+            if "</head>" not in patched:
+                raise RuntimeError("Could not inject motion styles (missing </head>).")
+            patched = patched.replace("</head>", style_block + "</head>", 1)
+
+        if "id=\"motionPreset\"" not in patched:
+            controls_block = (
+                "                <div class=\"divider\"></div>\n"
+                "                <div class=\"settingsRow\">\n"
+                "                    <div class=\"settingsLabel\">Motion</div>\n"
+                "                    <select id=\"motionPreset\"></select>\n"
+                "                </div>\n"
+                "                <div class=\"settingsRow\">\n"
+                "                    <button id=\"motionPlay\">Play Motion</button>\n"
+                "                    <button id=\"motionStop\">Stop Motion</button>\n"
+                "                </div>\n"
+                "                <div class=\"settingsRow\">\n"
+                "                    <div class=\"settingsLabel\">Speed</div>\n"
+                "                    <input id=\"motionSpeed\" type=\"range\" min=\"0.25\" max=\"2\" step=\"0.05\" value=\"1\">\n"
+                "                    <div id=\"motionSpeedValue\">1.00x</div>\n"
+                "                </div>\n"
+                "                <div class=\"divider\"></div>\n"
+                "                <div class=\"settingsRow\">\n"
+                "                    <button id=\"cameraDebug\">Camera Debug</button>\n"
+                "                </div>\n"
+                "                <div class=\"settingsRow\">\n"
+                "                    <div id=\"cameraDebugInfo\" class=\"hidden\"></div>\n"
+                "                </div>\n"
+            )
+            marker = (
+                "                <div class=\"settingsRow\">\n"
+                "                    <button id=\"frame\">Frame</button>\n"
+                "                    <button id=\"reset\">Reset</button>\n"
+                "                </div>"
+            )
+            if marker not in patched:
+                raise RuntimeError("Could not inject motion controls (settings buttons not found).")
+            patched = patched.replace(marker, marker + "\n" + controls_block, 1)
+
+        if "window.sharpMotionPresets" not in patched:
+            sse_pattern = r"(window\.sse\s*=\s*\{.*?\};)"
+            if not re.search(sse_pattern, patched, flags=re.S):
+                raise RuntimeError("Could not inject motion presets (window.sse not found).")
+            patched = re.sub(
+                sse_pattern,
+                r"\1\n            window.sharpMotionPresets = " + presets_json + ";",
+                patched,
+                count=1,
+                flags=re.S,
+            )
+
         return patched
 
     if output_html.is_file():
         patch_text_file(output_html, patch_viewer_html)
-
-    if not limit_camera:
-        return
-
-    # Hide fly camera button in the UI (if present).
-    if output_html.is_file():
-        def hide_fly_button(text: str) -> str:
-            if 'id="flyCamera"' not in text:
-                return text
-            if 'id="flyCamera" style="display:none"' in text:
-                return text
-            if '<button id="flyCamera"' in text:
-                return text.replace(
-                    '<button id="flyCamera"',
-                    '<button id="flyCamera" style="display:none"',
-                    1,
-                )
-            return text
-
-        patch_text_file(output_html, hide_fly_button)
 
     js_path = output_html if not unbundled else output_html.parent / "index.js"
     if not js_path.is_file():
@@ -115,62 +186,324 @@ def _apply_viewer_customizations(
     def patch_viewer_js(text: str) -> str:
         patched = text
 
-        # Disable fly mode via keyboard auto-switch.
-        no_fly_auto_switch = (
-            "if (state.cameraMode !== 'fly' && this._state.axis.length() > 0) {\n"
-            "            state.cameraMode = 'fly';\n"
-            "        }"
-        )
-        patched = patched.replace(no_fly_auto_switch, "")
-
-        # Disable panning (right-mouse / 2-finger) so the target stays fixed.
-        if "const pan = 0;" not in patched:
-            if "const pan = this._state.mouse[2] || +(button[2] === -1) || double;" not in patched:
-                raise RuntimeError("Could not disable panning (expected pan expression not found).")
-            patched = patched.replace(
-                "const pan = this._state.mouse[2] || +(button[2] === -1) || double;",
-                "const pan = 0;",
-                1,
-            )
-
-        # Clamp fly -> orbit if anything tries to switch modes.
-        if "property === 'cameraMode' && value === 'fly'" not in patched:
-            if "// not allowed to set a new value on target" not in patched:
-                raise RuntimeError("Could not patch cameraMode (anchor comment not found).")
-            patched = patched.replace(
-                "// not allowed to set a new value on target",
-                "if (property === 'cameraMode' && value === 'fly') {\n"
-                "                value = 'orbit';\n"
+        if "buildGsplatMotionTrack" not in patched:
+            helpers = (
+                "const buildGsplatMotionTrack = (preset, baseCamera, fps = 60) => {\n"
+                "    if (!preset || !baseCamera) {\n"
+                "        return null;\n"
+                "    }\n"
+                "    const numSteps = Math.max(2, Math.trunc(preset.numSteps || 60));\n"
+                "    const numRepeats = Math.max(1, Math.trunc(preset.numRepeats || 1));\n"
+                "    const totalSteps = Math.max(2, numSteps * numRepeats);\n"
+                "    const duration = totalSteps / fps;\n"
+                "    const times = new Array(totalSteps);\n"
+                "    const positions = [];\n"
+                "    const targets = [];\n"
+                "    const fovs = new Array(totalSteps).fill(baseCamera.fov);\n"
+                "    const basePos = new Vec3(baseCamera.position);\n"
+                "    const baseTarget = new Vec3(baseCamera.target);\n"
+                "    const forward = new Vec3();\n"
+                "    forward.sub2(baseTarget, basePos);\n"
+                "    const forwardDist = forward.length() || 1;\n"
+                "    forward.mulScalar(1 / forwardDist);\n"
+                "    const maxOffset = preset.maxOffset || [0, 0, 0];\n"
+                "    const distance = preset.distance || 0;\n"
+                "    const type = preset.type || 'rotate_forward';\n"
+                "    const lookat = preset.lookat || 'point';\n"
+                "    const halfSteps = Math.floor(totalSteps / 2);\n"
+                "    const horizontalRatio = totalSteps > 0 ? (halfSteps / totalSteps) : 0.5;\n"
+                "    const pos = new Vec3();\n"
+                "    const target = new Vec3();\n"
+                "    const twoPi = Math.PI * 2;\n"
+                "\n"
+                "    const samplePosition = (t) => {\n"
+                "        const phase = t * numRepeats;\n"
+                "        if (type === 'swipe') {\n"
+                "            const localT = phase - Math.floor(phase);\n"
+                "            pos.set(\n"
+                "                -maxOffset[0] + (maxOffset[0] * 2 * localT),\n"
+                "                0,\n"
+                "                distance\n"
+                "            );\n"
+                "            return;\n"
+                "        }\n"
+                "        if (type === 'shake') {\n"
+                "            if (t < horizontalRatio) {\n"
+                "                const localT = horizontalRatio > 0 ? (t / horizontalRatio) : 0;\n"
+                "                const angle = twoPi * (localT * numRepeats);\n"
+                "                pos.set(maxOffset[0] * Math.sin(angle), 0, distance);\n"
                 "            }\n"
-                "            // not allowed to set a new value on target",
+                "            else {\n"
+                "                const denom = 1 - horizontalRatio;\n"
+                "                const localT = denom > 0 ? ((t - horizontalRatio) / denom) : 0;\n"
+                "                const angle = twoPi * (localT * numRepeats);\n"
+                "                pos.set(0, maxOffset[1] * Math.sin(angle), distance);\n"
+                "            }\n"
+                "            return;\n"
+                "        }\n"
+                "        const angle = twoPi * phase;\n"
+                "        if (type === 'rotate') {\n"
+                "            pos.set(\n"
+                "                maxOffset[0] * Math.sin(angle),\n"
+                "                maxOffset[1] * Math.cos(angle),\n"
+                "                distance\n"
+                "            );\n"
+                "            return;\n"
+                "        }\n"
+                "        pos.set(\n"
+                "            maxOffset[0] * Math.sin(angle),\n"
+                "            0,\n"
+                "            distance + maxOffset[2] * (1 - Math.cos(angle)) * 0.5\n"
+                "        );\n"
+                "    };\n"
+                "\n"
+                "    for (let i = 0; i < totalSteps; i++) {\n"
+                "        const t = totalSteps > 1 ? i / (totalSteps - 1) : 0;\n"
+                "        times[i] = t * duration;\n"
+                "        samplePosition(t);\n"
+                "        pos.add(basePos);\n"
+                "        positions.push(pos.x, pos.y, pos.z);\n"
+                "        if (lookat === 'ahead') {\n"
+                "            target.copy(forward).mulScalar(forwardDist).add(pos);\n"
+                "        }\n"
+                "        else {\n"
+                "            target.copy(baseTarget);\n"
+                "        }\n"
+                "        targets.push(target.x, target.y, target.z);\n"
+                "    }\n"
+                "    return {\n"
+                "        name: preset.id || preset.type || 'gsplat',\n"
+                "        duration,\n"
+                "        frameRate: 1,\n"
+                "        loopMode: 'repeat',\n"
+                "        interpolation: 'spline',\n"
+                "        smoothness: 1,\n"
+                "        keyframes: {\n"
+                "            times,\n"
+                "            values: {\n"
+                "                position: positions,\n"
+                "                target: targets,\n"
+                "                fov: fovs\n"
+                "            }\n"
+                "        }\n"
+                "    };\n"
+                "};\n"
+                "\n"
+            )
+            marker = "class CubicSpline"
+            if marker not in patched:
+                raise RuntimeError("Could not inject motion helpers (CubicSpline not found).")
+            patched = patched.replace(marker, helpers + marker, 1)
+
+        if "animationSpeed" not in patched:
+            speed_anchor = "animationPaused: true,"
+            if speed_anchor not in patched:
+                raise RuntimeError("Could not patch animation speed (state anchor not found).")
+            patched = patched.replace(
+                speed_anchor,
+                speed_anchor + "\n        animationSpeed: 1,",
                 1,
             )
 
-        # Limit orbit pitch + zoom around the current pose (approx SHARP turntable feel).
-        orbit_limits_marker = "this.controller.zoomRange = new Vec2(dist * 0.85, dist * 1.15);"
-        if orbit_limits_marker not in patched:
-            if "this.controller.attach(p, false);" not in patched:
-                raise RuntimeError("Could not patch orbit camera limits (attach(p,false) not found).")
+        dt_anchor = "const dt = state.cameraMode === 'anim' && state.animationPaused ? 0 : deltaTime;"
+        if dt_anchor in patched:
             patched = patched.replace(
-                "this.controller.attach(p, false);",
-                "this.controller.yawRange = new Vec2(-180, 180);\n"
-                "        const pitch = camera.angles.x;\n"
-                "        this.controller.pitchRange = new Vec2(pitch - 20, pitch + 20);\n"
-                "        const dist = Math.max(camera.distance, 1e-6);\n"
-                f"        {orbit_limits_marker}\n"
-                "        this.controller.attach(p, false);",
+                dt_anchor,
+                "const dt = state.cameraMode === 'anim'\n"
+                "            ? (state.animationPaused ? 0 : deltaTime * (state.animationSpeed || 1))\n"
+                "            : deltaTime;",
                 1,
             )
-            if "this.controller.attach(p, true);" not in patched:
-                raise RuntimeError("Could not patch orbit camera limits (attach(p,true) not found).")
+        else:
+            raise RuntimeError("Could not patch animation speed (dt expression not found).")
+
+        if "setAnimTrack" not in patched:
+            anim_anchor = (
+                "state.animationDuration = controllers.anim ? controllers.anim.animState.cursor.duration : 0;"
+            )
+            if anim_anchor not in patched:
+                raise RuntimeError("Could not inject anim track setter (duration anchor not found).")
             patched = patched.replace(
-                "this.controller.attach(p, true);",
-                "this.controller.yawRange = new Vec2(-180, 180);\n"
-                "        const pitch = camera.angles.x;\n"
-                "        this.controller.pitchRange = new Vec2(pitch - 20, pitch + 20);\n"
-                "        const dist = Math.max(camera.distance, 1e-6);\n"
-                f"        {orbit_limits_marker}\n"
-                "        this.controller.attach(p, true);",
+                anim_anchor,
+                anim_anchor
+                + "\n        this.setAnimTrack = (track) => {\n"
+                "            if (!track) {\n"
+                "                return;\n"
+                "            }\n"
+                "            controllers.anim = new AnimController(track);\n"
+                "            state.hasAnimation = true;\n"
+                "            state.animationDuration = controllers.anim.animState.cursor.duration;\n"
+                "            state.animationTime = 0;\n"
+                "        };",
+                1,
+            )
+
+        if "global.cameraManager" not in patched:
+            camera_anchor = (
+                "this.cameraManager = new CameraManager(global, sceneBound);\n"
+                "            applyCamera(this.cameraManager.camera);"
+            )
+            if camera_anchor not in patched:
+                raise RuntimeError("Could not expose camera manager (anchor not found).")
+            patched = patched.replace(
+                camera_anchor,
+                "this.cameraManager = new CameraManager(global, sceneBound);\n"
+                "            global.cameraManager = this.cameraManager;\n"
+                "            applyCamera(this.cameraManager.camera);",
+                1,
+            )
+
+        dom_block = ""
+        dom_match = re.search(r"const\\s+dom\\s*=\\s*\\[(.*?)\\]\\s*\\.reduce", patched, flags=re.S)
+        if dom_match:
+            dom_block = dom_match.group(1)
+        if "motionPreset" not in dom_block:
+            dom_anchor = "'reset', 'frame',"
+            if dom_anchor not in patched:
+                raise RuntimeError("Could not add motion UI bindings (dom anchor not found).")
+            patched = patched.replace(
+                dom_anchor,
+                "'reset', 'frame',\n"
+                "        'motionPreset', 'motionPlay', 'motionStop', 'motionSpeed', 'motionSpeedValue',\n"
+                "        'cameraDebug', 'cameraDebugInfo',",
+                1,
+            )
+
+        if "motionPresets" not in patched:
+            frame_anchor = (
+                "    dom.frame.addEventListener('click', (event) => {\n"
+                "        events.fire('inputEvent', 'frame', event);\n"
+                "    });"
+            )
+            if frame_anchor not in patched:
+                raise RuntimeError("Could not add motion UI handlers (frame handler not found).")
+            motion_ui = (
+                "\n"
+                "    const motionPresets = (window.sharpMotionPresets && window.sharpMotionPresets.presets) || [];\n"
+                "    const motionFps = (window.sharpMotionPresets && window.sharpMotionPresets.fps) || 60;\n"
+                "    let motionPrevMode = 'orbit';\n"
+                "    const motionControlsReady = dom.motionPreset && dom.motionPlay && dom.motionStop && dom.motionSpeed && dom.motionSpeedValue;\n"
+                "    if (motionControlsReady) {\n"
+                "        if (motionPresets.length > 0) {\n"
+                "            dom.motionPreset.textContent = '';\n"
+                "            motionPresets.forEach((preset, index) => {\n"
+                "                const option = document.createElement('option');\n"
+                "                option.value = preset.id || preset.type || `preset_${index}`;\n"
+                "                option.textContent = preset.label || preset.type || `Preset ${index + 1}`;\n"
+                "                dom.motionPreset.appendChild(option);\n"
+                "            });\n"
+                "            const getSelectedPreset = () => {\n"
+                "                const selectedId = dom.motionPreset.value;\n"
+                "                return motionPresets.find((preset) => (preset.id || preset.type) === selectedId) || motionPresets[0];\n"
+                "            };\n"
+                "            const applyMotionPreset = () => {\n"
+                "                const baseCamera = global.settings.cameras && global.settings.cameras[0]\n"
+                "                    ? global.settings.cameras[0].initial\n"
+                "                    : null;\n"
+                "                if (!baseCamera || !global.cameraManager || !global.cameraManager.setAnimTrack) {\n"
+                "                    return;\n"
+                "                }\n"
+                "                const preset = getSelectedPreset();\n"
+                "                const track = buildGsplatMotionTrack(preset, baseCamera, motionFps);\n"
+                "                if (track) {\n"
+                "                    global.cameraManager.setAnimTrack(track);\n"
+                "                }\n"
+                "            };\n"
+                "            dom.motionPreset.addEventListener('change', () => {\n"
+                "                applyMotionPreset();\n"
+                "            });\n"
+                "            dom.motionPlay.addEventListener('click', () => {\n"
+                "                motionPrevMode = state.cameraMode;\n"
+                "                applyMotionPreset();\n"
+                "                state.cameraMode = 'anim';\n"
+                "                state.animationPaused = false;\n"
+                "            });\n"
+                "            dom.motionStop.addEventListener('click', () => {\n"
+                "                state.animationPaused = true;\n"
+                "                if (motionPrevMode) {\n"
+                "                    state.cameraMode = motionPrevMode;\n"
+                "                }\n"
+                "            });\n"
+                "            const updateSpeedLabel = (value) => {\n"
+                "                const speed = Math.max(0.25, Math.min(2, value));\n"
+                "                dom.motionSpeedValue.textContent = `${speed.toFixed(2)}x`;\n"
+                "                return speed;\n"
+                "            };\n"
+                "            const updateSpeed = () => {\n"
+                "                const raw = parseFloat(dom.motionSpeed.value);\n"
+                "                state.animationSpeed = updateSpeedLabel(isFinite(raw) ? raw : 1);\n"
+                "            };\n"
+                "            dom.motionSpeed.addEventListener('input', updateSpeed);\n"
+                "            events.on('animationSpeed:changed', (value) => {\n"
+                "                if (document.activeElement !== dom.motionSpeed) {\n"
+                "                    dom.motionSpeed.value = value.toString();\n"
+                "                }\n"
+                "                updateSpeedLabel(value);\n"
+                "            });\n"
+                "            dom.motionSpeed.value = (state.animationSpeed || 1).toString();\n"
+                "            updateSpeedLabel(state.animationSpeed || 1);\n"
+                "            events.on('firstFrame', () => {\n"
+                "                applyMotionPreset();\n"
+                "            });\n"
+                "        }\n"
+                "        else {\n"
+                "            dom.motionPreset.disabled = true;\n"
+                "            dom.motionPlay.disabled = true;\n"
+                "            dom.motionStop.disabled = true;\n"
+                "            dom.motionSpeed.disabled = true;\n"
+                "            dom.motionSpeedValue.textContent = '--';\n"
+                "        }\n"
+                "    }\n"
+                "    if (dom.cameraDebug && dom.cameraDebugInfo) {\n"
+                "        let debugActive = false;\n"
+                "        let debugHandle = 0;\n"
+                "        const debugTarget = new Vec3();\n"
+                "        const updateDebug = () => {\n"
+                "            if (!debugActive) {\n"
+                "                return;\n"
+                "            }\n"
+                "            const cam = global.cameraManager ? global.cameraManager.camera : null;\n"
+                "            if (cam) {\n"
+                "                cam.calcFocusPoint(debugTarget);\n"
+                "                dom.cameraDebugInfo.textContent =\n"
+                "                    `pos: ${cam.position.x.toFixed(3)}, ${cam.position.y.toFixed(3)}, ${cam.position.z.toFixed(3)}\\n` +\n"
+                "                    `rot: ${cam.angles.x.toFixed(2)}, ${cam.angles.y.toFixed(2)}, ${cam.angles.z.toFixed(2)}\\n` +\n"
+                "                    `fov: ${cam.fov.toFixed(2)}  dist: ${cam.distance.toFixed(3)}\\n` +\n"
+                "                    `target: ${debugTarget.x.toFixed(3)}, ${debugTarget.y.toFixed(3)}, ${debugTarget.z.toFixed(3)}`;\n"
+                "            }\n"
+                "            else {\n"
+                "                dom.cameraDebugInfo.textContent = 'Camera not ready';\n"
+                "            }\n"
+                "            debugHandle = requestAnimationFrame(updateDebug);\n"
+                "        };\n"
+                "        dom.cameraDebug.addEventListener('click', () => {\n"
+                "            debugActive = !debugActive;\n"
+                "            dom.cameraDebugInfo.classList.toggle('hidden', !debugActive);\n"
+                "            dom.cameraDebug.textContent = debugActive ? 'Hide Camera Debug' : 'Camera Debug';\n"
+                "            if (debugActive) {\n"
+                "                updateDebug();\n"
+                "            }\n"
+                "            else if (debugHandle) {\n"
+                "                cancelAnimationFrame(debugHandle);\n"
+                "                debugHandle = 0;\n"
+                "            }\n"
+                "        });\n"
+                "    }"
+            )
+            patched = patched.replace(frame_anchor, frame_anchor + motion_ui, 1)
+
+        tooltip_anchor = "tooltip.register(dom.exitFullscreen, 'Fullscreen', 'top');"
+        if tooltip_anchor in patched and "Play Motion" not in patched:
+            patched = patched.replace(
+                tooltip_anchor,
+                tooltip_anchor
+                + "\n    if (dom.motionPlay) {\n"
+                "        tooltip.register(dom.motionPlay, 'Play Motion', 'bottom');\n"
+                "        tooltip.register(dom.motionStop, 'Stop Motion', 'bottom');\n"
+                "    }\n"
+                "    if (dom.cameraDebug) {\n"
+                "        tooltip.register(dom.cameraDebug, 'Camera Debug', 'bottom');\n"
+                "    }",
                 1,
             )
 
@@ -339,9 +672,9 @@ def _read_ply_element_values(path: Path, element_name: str) -> list[float] | Non
     return None
 
 
-def _compute_gsplat_camera_settings(
+def _read_ply_camera_meta(
     path: Path,
-) -> tuple[dict[str, object], float | None, float] | None:
+) -> tuple[float, tuple[int, int], float] | None:
     if path.suffix.lower() != ".ply":
         return None
 
@@ -351,8 +684,10 @@ def _compute_gsplat_camera_settings(
 
     image_size = _read_ply_element_values(path, "image_size")
     if image_size and len(image_size) >= 2:
+        width = float(image_size[0])
         height = float(image_size[1])
     elif len(intrinsic) == 4:
+        width = float(intrinsic[2])
         height = float(intrinsic[3])
     else:
         return None
@@ -364,16 +699,29 @@ def _compute_gsplat_camera_settings(
     else:
         f_px = float(intrinsic[0])
 
-    fov = None
-    if f_px > 0 and height > 0:
-        fov = 2.0 * math.degrees(math.atan((height * 0.5) / f_px))
-
     depth_focus = 2.0
     disparity = _read_ply_element_values(path, "disparity")
     if disparity and len(disparity) >= 2:
         q90 = float(disparity[1])
         if q90 > 1e-6:
             depth_focus = max(depth_focus, 1.0 / q90)
+
+    return f_px, (int(width), int(height)), depth_focus
+
+
+def _compute_gsplat_camera_settings(
+    path: Path,
+) -> tuple[dict[str, object], float | None, float] | None:
+    meta = _read_ply_camera_meta(path)
+    if meta is None:
+        return None
+
+    f_px, resolution_px, depth_focus = meta
+    height = float(resolution_px[1])
+
+    fov = None
+    if f_px > 0 and height > 0:
+        fov = 2.0 * math.degrees(math.atan((height * 0.5) / f_px))
 
     camera_settings: dict[str, object] = {
         "camera": {
@@ -385,6 +733,193 @@ def _compute_gsplat_camera_settings(
         camera_settings["camera"]["fov"] = float(fov)
 
     return camera_settings, fov, depth_focus
+
+
+def _interpolated_quantile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    values.sort()
+    if len(values) == 1:
+        return float(values[0])
+    q = min(max(q, 0.0), 1.0)
+    pos = (len(values) - 1) * q
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(values[lo])
+    lower = values[lo]
+    upper = values[hi]
+    return float(lower + (upper - lower) * (pos - lo))
+
+
+def _find_vertex_property_offset(
+    prop_lines: list[str], name: str
+) -> tuple[int, str] | None:
+    offset = 0
+    for line in prop_lines:
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != "property":
+            continue
+        if parts[1] == "list":
+            raise RuntimeError(
+                "PLY contains variable-length list properties; cannot parse vertex depth."
+            )
+        prop_type = parts[1].lower()
+        prop_name = parts[2].lower()
+        size = _PLY_SCALAR_TYPE_SIZES.get(prop_type)
+        if size is None:
+            raise RuntimeError(f"Unsupported PLY scalar type: {prop_type}")
+        if prop_name == name:
+            return offset, prop_type
+        offset += size
+    return None
+
+
+def _compute_depth_quantile_from_ply(path: Path, quantile: float) -> float | None:
+    format_line, elements, data_start = _parse_ply_header(path)
+    if not format_line.startswith("format binary_"):
+        return None
+    if "binary_little_endian" in format_line:
+        endian = "<"
+    elif "binary_big_endian" in format_line:
+        endian = ">"
+    else:
+        return None
+
+    offset = data_start
+    vertex_offset = None
+    vertex_count = 0
+    vertex_record_size = 0
+    z_offset = None
+    z_type = None
+    for name, count, props in elements:
+        record_size = _element_fixed_record_size(props)
+        if name == "vertex":
+            vertex_offset = offset
+            vertex_count = count
+            vertex_record_size = record_size
+            z_info = _find_vertex_property_offset(props, "z")
+            if z_info is None:
+                return None
+            z_offset, z_type = z_info
+            break
+        offset += count * record_size
+
+    if vertex_offset is None or vertex_count <= 0 or z_offset is None or z_type is None:
+        return None
+
+    struct_char = _PLY_SCALAR_TYPE_STRUCT.get(z_type)
+    if struct_char is None:
+        raise RuntimeError(f"Unsupported PLY scalar type: {z_type}")
+
+    z_values: list[float] = []
+    z_struct = struct.Struct(endian + struct_char)
+    with path.open("rb") as f:
+        f.seek(vertex_offset)
+        remaining = vertex_count
+        batch_records = 16_384
+        while remaining > 0:
+            batch = min(batch_records, remaining)
+            data = f.read(batch * vertex_record_size)
+            if len(data) != batch * vertex_record_size:
+                raise RuntimeError("Unexpected EOF while reading PLY vertices.")
+            base = 0
+            for _ in range(batch):
+                z_val = z_struct.unpack_from(data, base + z_offset)[0]
+                if z_val > 0:
+                    z_values.append(float(z_val))
+                base += vertex_record_size
+            remaining -= batch
+
+    return _interpolated_quantile(z_values, quantile)
+
+
+def _compute_max_offset_xyz(
+    *,
+    min_depth: float,
+    resolution_px: tuple[int, int],
+    f_px: float,
+    max_disparity: float,
+    max_zoom: float,
+) -> list[float] | None:
+    width_px, height_px = resolution_px
+    if min_depth <= 0 or height_px <= 0 or f_px <= 0:
+        return None
+    aspect_ratio = width_px / height_px if height_px else 1.0
+    reference_aspect = 21 / 9
+    horizontal_scale = min(1.0, aspect_ratio / reference_aspect)
+    diagonal = math.sqrt((width_px / f_px) ** 2 + (height_px / f_px) ** 2)
+    max_lateral_offset = max_disparity * diagonal * min_depth
+    max_medial_offset = max_zoom * min_depth
+    return [
+        max_lateral_offset * horizontal_scale,
+        max_lateral_offset,
+        max_medial_offset,
+    ]
+
+
+def _format_motion_label(traj_type: str, index: int) -> str:
+    return f"{traj_type.replace('_', ' ').title()} {index + 1}"
+
+
+def _compute_gsplat_motion_presets(path: Path) -> dict[str, object] | None:
+    meta = _read_ply_camera_meta(path)
+    if meta is None:
+        return None
+
+    f_px, resolution_px, _depth_focus = meta
+    min_depth = _compute_depth_quantile_from_ply(path, 0.001)
+    if min_depth is None:
+        return None
+
+    base_max_disparity = 0.08
+    base_max_zoom = 0.15
+    base_distance = 0.0
+    base_num_steps = 60
+    preset_count = 5
+    variant_types = [
+        "rotate_forward",
+        "rotate",
+        "swipe",
+        "shake",
+        "rotate_forward",
+    ]
+
+    presets: list[dict[str, object]] = []
+    for variant_index in range(preset_count):
+        rng = random.Random(variant_index)
+        disparity_scale = rng.uniform(0.6, 1.6)
+        zoom_scale = rng.uniform(0.6, 1.6)
+        distance_offset = rng.uniform(-0.2, 0.2)
+        repeats = rng.choice([1, 2, 3])
+        lookat_mode = rng.choice(["point", "ahead"])
+        traj_type = variant_types[variant_index % len(variant_types)]
+        max_offset = _compute_max_offset_xyz(
+            min_depth=min_depth,
+            resolution_px=resolution_px,
+            f_px=f_px,
+            max_disparity=base_max_disparity * disparity_scale,
+            max_zoom=base_max_zoom * zoom_scale,
+        )
+        if max_offset is None:
+            continue
+        presets.append(
+            {
+                "id": f"v{variant_index:02d}",
+                "label": _format_motion_label(traj_type, variant_index),
+                "type": traj_type,
+                "lookat": lookat_mode,
+                "maxOffset": [round(val, 6) for val in max_offset],
+                "distance": round(base_distance + distance_offset, 6),
+                "numSteps": base_num_steps,
+                "numRepeats": repeats,
+            }
+        )
+
+    if not presets:
+        return None
+
+    return {"version": 1, "fps": 60, "presets": presets}
 
 
 def _merge_viewer_settings(
@@ -623,7 +1158,6 @@ def main() -> None:
             viewer_settings=settings_path,
             unbundled=bool(unbundled_var.get()),
             overwrite=bool(overwrite_var.get()),
-            limit_camera=bool(limit_camera_var.get()),
             enable_aa=bool(enable_aa_var.get()),
             enable_msaa=bool(enable_msaa_var.get()),
             match_gsplat_camera=bool(match_gsplat_camera_var.get()),
@@ -704,6 +1238,14 @@ def main() -> None:
                             effective_cfg, viewer_settings=settings_path
                         )
 
+            motion_presets = None
+            try:
+                motion_presets = _compute_gsplat_motion_presets(cfg.input_path)
+                if motion_presets is not None:
+                    log_line("Embedding gsplat motion presets in viewer.")
+            except Exception as exc:
+                log_line(f"Could not derive gsplat motion presets: {exc}")
+
             if _needs_vertex_only_ply(effective_cfg.input_path):
                 log_line(
                     "Input PLY contains extra metadata elements; generating a vertex-only copy for "
@@ -735,20 +1277,20 @@ def main() -> None:
             if rc != 0:
                 raise RuntimeError(f"splat-transform exited with code {rc}")
 
-            if effective_cfg.limit_camera or effective_cfg.enable_aa or effective_cfg.enable_msaa:
-                patch_bits = []
-                patch_bits.append(f"AA={'on' if effective_cfg.enable_aa else 'off'}")
-                patch_bits.append(f"MSAA={'on' if effective_cfg.enable_msaa else 'off'}")
-                if effective_cfg.limit_camera:
-                    patch_bits.append("camera limits")
-                log_line("Applying viewer defaults (" + ", ".join(patch_bits) + ")...")
-                _apply_viewer_customizations(
-                    effective_cfg.output_html,
-                    unbundled=effective_cfg.unbundled,
-                    limit_camera=effective_cfg.limit_camera,
-                    enable_aa=effective_cfg.enable_aa,
-                    enable_msaa=effective_cfg.enable_msaa,
-                )
+            patch_bits = [
+                f"AA={'on' if effective_cfg.enable_aa else 'off'}",
+                f"MSAA={'on' if effective_cfg.enable_msaa else 'off'}",
+            ]
+            if motion_presets is not None:
+                patch_bits.append("gsplat motion presets")
+            log_line("Applying viewer defaults (" + ", ".join(patch_bits) + ")...")
+            _apply_viewer_customizations(
+                effective_cfg.output_html,
+                unbundled=effective_cfg.unbundled,
+                enable_aa=effective_cfg.enable_aa,
+                enable_msaa=effective_cfg.enable_msaa,
+                motion_presets=motion_presets,
+            )
 
             log_line(f"Done in {time.time() - started:.1f}s")
         except Exception as exc:
@@ -781,7 +1323,6 @@ def main() -> None:
     settings_var = tk.StringVar(value="")
     unbundled_var = tk.IntVar(value=0)
     overwrite_var = tk.IntVar(value=1)
-    limit_camera_var = tk.IntVar(value=1)
     match_gsplat_camera_var = tk.IntVar(value=1)
     enable_aa_var = tk.IntVar(value=1)
     enable_msaa_var = tk.IntVar(value=1)
@@ -821,9 +1362,6 @@ def main() -> None:
     opts.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
     ttk.Checkbutton(opts, text="Overwrite output", variable=overwrite_var).pack(side="left")
     ttk.Checkbutton(opts, text="Unbundled output (-U)", variable=unbundled_var).pack(
-        side="left", padx=(12, 0)
-    )
-    ttk.Checkbutton(opts, text="Limit camera controls (SHARP-style)", variable=limit_camera_var).pack(
         side="left", padx=(12, 0)
     )
     ttk.Checkbutton(opts, text="Match gsplat camera", variable=match_gsplat_camera_var).pack(
