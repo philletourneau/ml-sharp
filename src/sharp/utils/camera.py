@@ -17,6 +17,7 @@ from .linalg import eyes
 
 TrajetoryType = Literal["swipe", "shake", "rotate", "rotate_forward"]
 LookAtMode = Literal["point", "ahead"]
+MOTION_AMPLITUDE_SCALE = 0.65
 
 
 @dataclasses.dataclass
@@ -68,9 +69,9 @@ def compute_max_offset(
     # Reduce horizontal motion as aspect ratio narrows versus the 21:9 baseline.
     horizontal_scale = min(1.0, aspect_ratio / reference_aspect)
     diagonal = np.sqrt((r_px[0] / f_px) ** 2 + (r_px[1] / f_px) ** 2)
-    max_lateral_offset_m = params.max_disparity * diagonal * min_depth
+    max_lateral_offset_m = params.max_disparity * diagonal * min_depth * MOTION_AMPLITUDE_SCALE
 
-    max_medial_offset_m = params.max_zoom * min_depth
+    max_medial_offset_m = params.max_zoom * min_depth * MOTION_AMPLITUDE_SCALE
     max_offset_xyz_m = np.array(
         [
             max_lateral_offset_m * horizontal_scale,

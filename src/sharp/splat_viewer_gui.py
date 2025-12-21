@@ -26,6 +26,10 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+MOTION_PRESET_FPS = 6
+MOTION_AMPLITUDE_SCALE = 0.65
+
+
 class RunConfig:
     input_path: Path
     output_html: Path
@@ -56,7 +60,7 @@ def _apply_viewer_customizations(
         if patched != text:
             path.write_text(patched, encoding="utf-8")
 
-    presets_payload = motion_presets or {"version": 1, "fps": 60, "presets": []}
+    presets_payload = motion_presets or {"version": 1, "fps": MOTION_PRESET_FPS, "presets": []}
     presets_json = json.dumps(presets_payload, separators=(",", ":"))
 
     def patch_viewer_html(text: str) -> str:
@@ -188,7 +192,7 @@ def _apply_viewer_customizations(
 
         if "buildGsplatMotionTrack" not in patched:
             helpers = (
-                "const buildGsplatMotionTrack = (preset, baseCamera, fps = 60) => {\n"
+                "const buildGsplatMotionTrack = (preset, baseCamera, fps = 6) => {\n"
                 "    if (!preset || !baseCamera) {\n"
                 "        return null;\n"
                 "    }\n"
@@ -380,7 +384,7 @@ def _apply_viewer_customizations(
             motion_ui = (
                 "\n"
                 "    const motionPresets = (window.sharpMotionPresets && window.sharpMotionPresets.presets) || [];\n"
-                "    const motionFps = (window.sharpMotionPresets && window.sharpMotionPresets.fps) || 60;\n"
+                "    const motionFps = (window.sharpMotionPresets && window.sharpMotionPresets.fps) || 6;\n"
                 "    let motionPrevMode = 'orbit';\n"
                 "    const motionControlsReady = dom.motionPreset && dom.motionPlay && dom.motionStop && dom.motionSpeed && dom.motionSpeedValue;\n"
                 "    if (motionControlsReady) {\n"
@@ -849,8 +853,8 @@ def _compute_max_offset_xyz(
     reference_aspect = 21 / 9
     horizontal_scale = min(1.0, aspect_ratio / reference_aspect)
     diagonal = math.sqrt((width_px / f_px) ** 2 + (height_px / f_px) ** 2)
-    max_lateral_offset = max_disparity * diagonal * min_depth
-    max_medial_offset = max_zoom * min_depth
+    max_lateral_offset = max_disparity * diagonal * min_depth * MOTION_AMPLITUDE_SCALE
+    max_medial_offset = max_zoom * min_depth * MOTION_AMPLITUDE_SCALE
     return [
         max_lateral_offset * horizontal_scale,
         max_lateral_offset,
@@ -919,7 +923,7 @@ def _compute_gsplat_motion_presets(path: Path) -> dict[str, object] | None:
     if not presets:
         return None
 
-    return {"version": 1, "fps": 60, "presets": presets}
+    return {"version": 1, "fps": MOTION_PRESET_FPS, "presets": presets}
 
 
 def _merge_viewer_settings(
