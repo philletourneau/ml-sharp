@@ -28,6 +28,8 @@ sharp = "sharp.cli:main_cli"
 sharp-gui = "sharp.gui:main"
 sharp-usdz-gui = "sharp.usdz_gui:main"
 sharp-splat-viewer-gui = "sharp.splat_viewer_gui:main"
+sharp-photo-to-viewer = "sharp.cli.photo_to_viewer:photo_to_viewer_cli"
+sharp-photo-to-viewer-gui = "sharp.photo_to_viewer_gui:main"
 
 [project.urls]
 Homepage = "https://github.com/apple/ml-sharp"

@@ -1063,6 +1063,110 @@ def _build_command(cfg: RunConfig) -> tuple[list[str], Path]:
     return base + args, vendor_root
 
 
+def generate_viewer(cfg: RunConfig, *, log_line: Callable[[str], None] | None = None) -> None:
+    """Generate a self-contained HTML viewer from a SHARP Gaussians PLY."""
+
+    def emit(msg: str) -> None:
+        if log_line is not None:
+            log_line(msg)
+
+    started = time.time()
+    effective_cfg = cfg
+    temp_dir: tempfile.TemporaryDirectory[str] | None = None
+    try:
+        if cfg.match_gsplat_camera:
+            try:
+                camera_result = _compute_gsplat_camera_settings(cfg.input_path)
+            except Exception as exc:
+                emit(f"Could not derive gsplat camera settings: {exc}")
+            else:
+                if camera_result is None:
+                    emit("Could not derive gsplat camera settings; using defaults.")
+                else:
+                    camera_settings, fov, depth_focus = camera_result
+                    if fov is None:
+                        fov_label = "default fov"
+                    else:
+                        fov_label = f"fov={fov:.2f}deg"
+                    emit(f"Using gsplat camera settings ({fov_label}, focus={depth_focus:.2f}m).")
+                    merged_settings = camera_settings
+                    if cfg.viewer_settings is not None:
+                        existing = _load_viewer_settings(cfg.viewer_settings)
+                        merged_settings = _merge_viewer_settings(existing, camera_settings)
+                    if temp_dir is None:
+                        temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
+                    settings_path = Path(temp_dir.name) / "viewer.settings.json"
+                    settings_path.write_text(
+                        json.dumps(merged_settings, indent=2),
+                        encoding="utf-8",
+                    )
+                    effective_cfg = dataclasses.replace(
+                        effective_cfg, viewer_settings=settings_path
+                    )
+
+        motion_presets = None
+        try:
+            motion_presets = _compute_gsplat_motion_presets(cfg.input_path)
+            if motion_presets is not None:
+                emit("Embedding gsplat motion presets in viewer.")
+        except Exception as exc:
+            emit(f"Could not derive gsplat motion presets: {exc}")
+
+        if _needs_vertex_only_ply(effective_cfg.input_path):
+            emit(
+                "Input PLY contains extra metadata elements; generating a vertex-only copy for "
+                "splat-transform..."
+            )
+            if temp_dir is None:
+                temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
+            stripped = Path(temp_dir.name) / f"{effective_cfg.input_path.stem}.vertex-only.ply"
+            _write_vertex_only_ply(effective_cfg.input_path, stripped)
+            effective_cfg = dataclasses.replace(effective_cfg, input_path=stripped)
+
+        cmd, cwd = _build_command(effective_cfg)
+        emit("Running: " + " ".join(cmd))
+
+        effective_cfg.output_html.parent.mkdir(parents=True, exist_ok=True)
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            emit(line)
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"splat-transform exited with code {rc}")
+
+        patch_bits = [
+            f"AA={'on' if effective_cfg.enable_aa else 'off'}",
+            f"MSAA={'on' if effective_cfg.enable_msaa else 'off'}",
+        ]
+        if motion_presets is not None:
+            patch_bits.append("gsplat motion presets")
+        emit("Applying viewer defaults (" + ", ".join(patch_bits) + ")...")
+        _apply_viewer_customizations(
+            effective_cfg.output_html,
+            unbundled=effective_cfg.unbundled,
+            enable_aa=effective_cfg.enable_aa,
+            enable_msaa=effective_cfg.enable_msaa,
+            motion_presets=motion_presets,
+        )
+
+        emit(f"Done in {time.time() - started:.1f}s")
+    finally:
+        try:
+            if temp_dir is not None:
+                temp_dir.cleanup()
+        except Exception:
+            pass
+
+
 def main() -> None:
     import tkinter as tk
     from tkinter import filedialog, ttk
@@ -1204,106 +1308,11 @@ def main() -> None:
 
     def run_in_thread(cfg: RunConfig) -> None:
         set_running(True)
-        started = time.time()
         try:
-            effective_cfg = cfg
-            temp_dir: tempfile.TemporaryDirectory[str] | None = None
-            if cfg.match_gsplat_camera:
-                try:
-                    camera_result = _compute_gsplat_camera_settings(cfg.input_path)
-                except Exception as exc:
-                    log_line(f"Could not derive gsplat camera settings: {exc}")
-                else:
-                    if camera_result is None:
-                        log_line("Could not derive gsplat camera settings; using defaults.")
-                    else:
-                        camera_settings, fov, depth_focus = camera_result
-                        if fov is None:
-                            fov_label = "default fov"
-                        else:
-                            fov_label = f"fov={fov:.2f}deg"
-                        log_line(
-                            "Using gsplat camera settings "
-                            f"({fov_label}, focus={depth_focus:.2f}m)."
-                        )
-                        merged_settings = camera_settings
-                        if cfg.viewer_settings is not None:
-                            existing = _load_viewer_settings(cfg.viewer_settings)
-                            merged_settings = _merge_viewer_settings(existing, camera_settings)
-                        if temp_dir is None:
-                            temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
-                        settings_path = Path(temp_dir.name) / "viewer.settings.json"
-                        settings_path.write_text(
-                            json.dumps(merged_settings, indent=2),
-                            encoding="utf-8",
-                        )
-                        effective_cfg = dataclasses.replace(
-                            effective_cfg, viewer_settings=settings_path
-                        )
-
-            motion_presets = None
-            try:
-                motion_presets = _compute_gsplat_motion_presets(cfg.input_path)
-                if motion_presets is not None:
-                    log_line("Embedding gsplat motion presets in viewer.")
-            except Exception as exc:
-                log_line(f"Could not derive gsplat motion presets: {exc}")
-
-            if _needs_vertex_only_ply(effective_cfg.input_path):
-                log_line(
-                    "Input PLY contains extra metadata elements; generating a vertex-only copy for "
-                    "splat-transform..."
-                )
-                if temp_dir is None:
-                    temp_dir = tempfile.TemporaryDirectory(prefix="sharp-splat-transform-")
-                stripped = Path(temp_dir.name) / f"{effective_cfg.input_path.stem}.vertex-only.ply"
-                _write_vertex_only_ply(effective_cfg.input_path, stripped)
-                effective_cfg = dataclasses.replace(effective_cfg, input_path=stripped)
-
-            cmd, cwd = _build_command(effective_cfg)
-            log_line("Running: " + " ".join(cmd))
-
-            effective_cfg.output_html.parent.mkdir(parents=True, exist_ok=True)
-
-            proc = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                output_q.put(line)
-            rc = proc.wait()
-            if rc != 0:
-                raise RuntimeError(f"splat-transform exited with code {rc}")
-
-            patch_bits = [
-                f"AA={'on' if effective_cfg.enable_aa else 'off'}",
-                f"MSAA={'on' if effective_cfg.enable_msaa else 'off'}",
-            ]
-            if motion_presets is not None:
-                patch_bits.append("gsplat motion presets")
-            log_line("Applying viewer defaults (" + ", ".join(patch_bits) + ")...")
-            _apply_viewer_customizations(
-                effective_cfg.output_html,
-                unbundled=effective_cfg.unbundled,
-                enable_aa=effective_cfg.enable_aa,
-                enable_msaa=effective_cfg.enable_msaa,
-                motion_presets=motion_presets,
-            )
-
-            log_line(f"Done in {time.time() - started:.1f}s")
+            generate_viewer(cfg, log_line=log_line)
         except Exception as exc:
             log_line(f"ERROR: {exc}")
         finally:
-            try:
-                if temp_dir is not None:
-                    temp_dir.cleanup()
-            except Exception:
-                pass
             set_running(False)
 
     def on_run() -> None:
