@@ -175,3 +175,4 @@ cython_debug/
 *.pt
 cuda-keyring_*.deb
 .aider*
+/.venv-build-photo-to-viewer-gui
